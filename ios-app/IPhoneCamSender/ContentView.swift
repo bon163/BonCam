@@ -10,23 +10,30 @@ struct ContentView: View {
 
     var body: some View {
         NavigationStack {
-            ZStack {
-                AppBackground()
+            GeometryReader { geometry in
+                ZStack {
+                    AppBackground()
 
-                ScrollView(showsIndicators: false) {
-                    VStack(spacing: 18) {
-                        header
-                        previewPanel
-                        connectionPanel
-                        controlsPanel
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 18) {
+                            header
+                            previewPanel
+                            connectionPanel
+                            controlsPanel
+                        }
+                        .frame(minHeight: geometry.size.height, alignment: .top)
+                        .padding(.horizontal, 18)
+                        .padding(.top, 18)
+                        .padding(.bottom, 28)
                     }
-                    .padding(.horizontal, 18)
-                    .padding(.top, 18)
-                    .padding(.bottom, 28)
                 }
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .ignoresSafeArea(.container, edges: [.top, .bottom])
             }
             .navigationTitle("BonCam")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbarColorScheme(.dark, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     NavigationLink {
