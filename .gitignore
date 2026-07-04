@@ -1,0 +1,15 @@
+.tools/
+target/
+bin/
+obj/
+*.obj
+.DS_Store
+DerivedData/
+*.user
+*.swp
+*.tmp
+*.log
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+paired-devices.json

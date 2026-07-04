@@ -1,0 +1,18 @@
+[package]
+name = "windows-host"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes.workspace = true
+minifb = "0.28"
+openh264 = { version = "0.9.3", features = ["source"] }
+protocol = { path = "../shared/protocol" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
