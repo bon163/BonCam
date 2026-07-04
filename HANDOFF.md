@@ -1,6 +1,17 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-04 (Claude session: rotation-aware landscape support + Windows Camera diagnosis)
+Last updated: 2026-07-05 (Codex session: iOS redesign merged to main)
+
+## Standing workflow preference
+
+When moving completed branch work into `main`, use a pull request workflow by
+default: push the feature branch, create a PR into `main`, verify/merge the PR,
+then update local `main` from the merged result. Only merge directly into
+`main` when the user explicitly asks to bypass PRs.
+
+2026-07-05: `IOS-Redesign` was merged directly into `main` and pushed as
+commit `4bb43d6` (`Merge IOS redesign`). Future similar requests should use the
+PR workflow above unless told otherwise.
 
 ## 2026-07-04 afternoon: host-death investigation + black-box logging added
 
