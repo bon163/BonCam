@@ -4,7 +4,9 @@ bin/
 obj/
 *.obj
 .DS_Store
+._*
 DerivedData/
+.deriveddata/
 *.user
 *.swp
 *.tmp
@@ -12,4 +14,5 @@ DerivedData/
 *.xcuserstate
 *.xcworkspace/xcuserdata/
 *.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/
 paired-devices.json

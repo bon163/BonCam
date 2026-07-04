@@ -6,57 +6,575 @@ import WebKit
 
 struct ContentView: View {
     @EnvironmentObject private var appModel: AppModel
+    @State private var showingSettings = false
     @State private var showingWebRTC = false
 
     var body: some View {
-        VStack(spacing: 16) {
-            CameraPreviewView(session: appModel.captureManager.session)
-                .frame(maxWidth: .infinity, maxHeight: 360)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
+        GeometryReader { geometry in
+            let metrics = LayoutMetrics(geometry: geometry)
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Connection")
-                    .font(.headline)
-                TextField("Windows host IP", text: $appModel.hostAddress)
-                    .textFieldStyle(.roundedBorder)
-                    .textInputAutocapitalization(.never)
-                    .disableAutocorrection(true)
-                Text("State: \(appModel.connectionState)")
-                    .font(.subheadline)
-                if !appModel.pairCode.isEmpty {
-                    Text("Pair code: \(appModel.pairCode)")
-                        .font(.subheadline.monospacedDigit())
+            ZStack {
+                AppBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: metrics.sectionSpacing) {
+                        topBar(metrics: metrics)
+                        heroPanel(metrics: metrics)
+                        statusStrip(metrics: metrics)
+                        connectionPanel(metrics: metrics)
+                        controlsPanel(metrics: metrics)
+                    }
+                    .padding(.horizontal, metrics.horizontalPadding)
+                    .padding(.top, metrics.topPadding)
+                    .padding(.bottom, metrics.bottomPadding)
                 }
             }
-
-            Button("Open WebRTC Sender") {
-                showingWebRTC = true
+            .preferredColorScheme(.dark)
+            .sheet(isPresented: $showingSettings) {
+                NavigationStack {
+                    SettingsView()
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
             }
-            .buttonStyle(.borderedProminent)
+            .sheet(isPresented: $showingWebRTC) {
+                WebRTCSenderView(
+                    hostAddress: appModel.hostAddress,
+                    initialFacing: appModel.cameraPosition == .back ? "environment" : "user",
+                    initialQuality: appModel.selectedPreset == .hd720p30 ? 720 : 1080,
+                    onStatus: { appModel.webRTCStatusChanged($0) },
+                    onConfig: { facing, quality in appModel.applyWebRTCConfig(facing: facing, quality: quality) }
+                )
+                .ignoresSafeArea()
+                .onDisappear { appModel.webRTCStatusChanged("Idle") }
+            }
+            .onAppear { appModel.startPreview() }
+            .onChange(of: showingWebRTC) { _, presented in
+                if presented {
+                    appModel.stopPreview()
+                } else {
+                    appModel.startPreview()
+                }
+            }
+        }
+    }
+
+    private func topBar(metrics: LayoutMetrics) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("BonCam")
+                    .font(.system(size: metrics.brandSize, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text("Turn your iPhone into a clean live camera feed for Windows.")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.68))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 16)
+
+            Button {
+                showingSettings = true
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: metrics.iconButtonSize, height: metrics.iconButtonSize)
+                    .background(.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(.white.opacity(0.10), lineWidth: 1)
+                    }
+            }
+            .accessibilityLabel("Settings")
+        }
+    }
+
+    private func heroPanel(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ZStack(alignment: .topLeading) {
+                CameraPreviewView(session: appModel.captureManager.session)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: metrics.previewHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: metrics.previewCornerRadius, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: metrics.previewCornerRadius, style: .continuous)
+                            .stroke(.white.opacity(0.10), lineWidth: 1)
+                    }
+
+                LinearGradient(
+                    colors: [.black.opacity(0.42), .clear, .black.opacity(0.56)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .clipShape(RoundedRectangle(cornerRadius: metrics.previewCornerRadius, style: .continuous))
+
+                HStack {
+                    Label(appModel.isStreaming ? "Broadcasting" : "Ready to stream", systemImage: appModel.isStreaming ? "dot.radiowaves.left.and.right" : "sparkles")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(appModel.isStreaming ? Color.green : Color.cyan)
+                        .background(.black.opacity(0.32), in: Capsule())
+
+                    Spacer()
+
+                    Label(appModel.cameraPosition == .back ? "Back" : "Front", systemImage: appModel.cameraPosition == .back ? "camera.fill" : "person.crop.square.fill")
+                        .font(.caption.weight(.bold))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .foregroundStyle(.white)
+                        .background(.black.opacity(0.32), in: Capsule())
+                }
+                .padding(16)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Spacer()
+
+                    Text("Framed for every iPhone")
+                        .font(.system(size: metrics.heroTitleSize, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+
+                    Text(appModel.hostAddress.isEmpty ? "Add your Windows host in settings to start streaming." : "Streaming target: \(appModel.hostAddress)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(.white.opacity(0.74))
+                        .lineLimit(2)
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            }
 
             HStack(spacing: 12) {
-                Button(appModel.isStreaming ? "Stop" : "Start") {
-                    appModel.isStreaming ? appModel.stop() : appModel.start()
-                }
-                .buttonStyle(.borderedProminent)
+                MetricChip(title: "Quality", value: appModel.selectedPreset.displayName, accent: .cyan)
+                MetricChip(title: "Status", value: appModel.connectionState, accent: connectionColor(for: appModel.connectionState))
+            }
+        }
+        .shadow(color: .black.opacity(0.30), radius: 30, x: 0, y: 18)
+    }
 
-                Button("Switch Camera") {
-                    appModel.switchCamera()
-                }
-                .buttonStyle(.bordered)
+    private func statusStrip(metrics: LayoutMetrics) -> some View {
+        HStack(spacing: 12) {
+            StatusPill(
+                title: "Connection",
+                value: appModel.connectionState,
+                systemImage: "antenna.radiowaves.left.and.right",
+                accent: connectionColor(for: appModel.connectionState)
+            )
 
-                Button(appModel.selectedPreset == .hd720p30 ? "Use 1080p" : "Use 720p") {
-                    appModel.togglePreset()
-                }
-                .buttonStyle(.bordered)
+            StatusPill(
+                title: "Pair code",
+                value: appModel.pairCode.isEmpty ? "Waiting" : appModel.pairCode,
+                systemImage: "key.fill",
+                accent: appModel.pairCode.isEmpty ? .white.opacity(0.72) : .yellow
+            )
+        }
+    }
+
+    private func connectionPanel(metrics: LayoutMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Session")
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                ConnectionBadge(state: appModel.connectionState)
             }
 
-            Spacer()
+            GlassPanel {
+                HStack(spacing: 14) {
+                    Circle()
+                        .fill(.white.opacity(0.12))
+                        .frame(width: 44, height: 44)
+                        .overlay {
+                            Image(systemName: "desktopcomputer")
+                                .font(.title3.weight(.bold))
+                                .foregroundStyle(.cyan)
+                        }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Windows host")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.58))
+
+                        Text(appModel.hostAddress.isEmpty ? "Add an IP address in settings" : appModel.hostAddress)
+                            .font(.system(.headline, design: .monospaced))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+            }
+
+            Text("Landscape is supported for cleaner framing, and the preview now scales edge-to-edge while still respecting the Dynamic Island and home indicator.")
+                .font(.footnote.weight(.medium))
+                .foregroundStyle(.white.opacity(0.62))
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding()
-        .sheet(isPresented: $showingWebRTC) {
-            WebRTCSenderView(hostAddress: appModel.hostAddress)
+    }
+
+    private func controlsPanel(metrics: LayoutMetrics) -> some View {
+        VStack(spacing: 14) {
+            Button {
+                showingWebRTC = true
+            } label: {
+                Label("Start Stream", systemImage: "play.fill")
+                    .font(.headline.weight(.bold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: metrics.primaryButtonHeight)
+            }
+            .buttonStyle(PrimaryControlButtonStyle())
+
+            HStack(spacing: 12) {
+                Button {
+                    appModel.switchCamera()
+                } label: {
+                    Label("Switch camera", systemImage: "arrow.triangle.2.circlepath.camera.fill")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: metrics.secondaryButtonHeight)
+                }
+                .buttonStyle(SecondaryControlButtonStyle())
+
+                Button {
+                    appModel.togglePreset()
+                } label: {
+                    Label(appModel.selectedPreset == .hd720p30 ? "Use 1080p" : "Use 720p", systemImage: "rectangle.inset.filled")
+                        .frame(maxWidth: .infinity)
+                        .frame(height: metrics.secondaryButtonHeight)
+                }
+                .buttonStyle(SecondaryControlButtonStyle(accent: .mint))
+            }
         }
+    }
+
+    private func connectionColor(for state: String) -> Color {
+        let normalized = state.lowercased()
+        if normalized.contains("stream") || normalized.contains("connected") {
+            return .green
+        }
+        if normalized.contains("pair") {
+            return .yellow
+        }
+        if normalized.contains("fail") {
+            return .red
+        }
+        return .white.opacity(0.72)
+    }
+}
+
+struct SettingsView: View {
+    @EnvironmentObject private var appModel: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            AppBackground()
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Host setup")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.white)
+
+                    GlassPanel {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Windows host IP")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.62))
+
+                            TextField("192.168.1.10", text: $appModel.hostAddress)
+                                .keyboardType(.numbersAndPunctuation)
+                                .textInputAutocapitalization(.never)
+                                .disableAutocorrection(true)
+                                .font(.system(.title3, design: .monospaced).weight(.medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .background(.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                                }
+
+                            Text("Use the IP address of the Windows machine receiving the camera stream.")
+                                .font(.footnote)
+                                .foregroundStyle(.white.opacity(0.58))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Text("Current setup")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.white)
+
+                    VStack(spacing: 12) {
+                        SettingsInfoRow(title: "Camera", value: appModel.cameraPosition == .back ? "Back" : "Front", systemImage: "camera.fill")
+                        SettingsInfoRow(title: "Quality", value: appModel.selectedPreset.displayName, systemImage: "rectangle.inset.filled")
+                        SettingsInfoRow(title: "Status", value: appModel.connectionState, systemImage: "waveform.path.ecg")
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 28)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Done") {
+                    dismiss()
+                }
+                .font(.headline.weight(.semibold))
+            }
+        }
+        .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .preferredColorScheme(.dark)
+    }
+}
+
+struct SettingsInfoRow: View {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var body: some View {
+        GlassPanel {
+            HStack(spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.headline.weight(.bold))
+                    .foregroundStyle(.cyan)
+                    .frame(width: 24)
+
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Text(value)
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.74))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.72)
+            }
+        }
+    }
+}
+
+struct ConnectionBadge: View {
+    let state: String
+
+    private var color: Color {
+        let lowercased = state.lowercased()
+        if lowercased.contains("stream") || lowercased.contains("connected") {
+            return .green
+        }
+        if lowercased.contains("fail") {
+            return .red
+        }
+        if lowercased.contains("pair") {
+            return .yellow
+        }
+        return .white.opacity(0.66)
+    }
+
+    var body: some View {
+        Text(state)
+            .font(.caption.weight(.bold))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(color.opacity(0.14), in: Capsule())
+    }
+}
+
+struct StatusPill: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.62))
+
+            Text(value)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+struct MetricChip: View {
+    let title: String
+    let value: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.black))
+                .foregroundStyle(.white.opacity(0.54))
+
+            Text(value)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(accent)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.08), lineWidth: 1)
+        }
+    }
+}
+
+struct GlassPanel<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(.white.opacity(0.10), lineWidth: 1)
+            }
+    }
+}
+
+struct AppBackground: View {
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.03, green: 0.04, blue: 0.06),
+                    Color(red: 0.05, green: 0.10, blue: 0.13),
+                    Color(red: 0.12, green: 0.10, blue: 0.07)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+
+            Circle()
+                .fill(Color.cyan.opacity(0.20))
+                .frame(width: 320, height: 320)
+                .blur(radius: 80)
+                .offset(x: -120, y: -240)
+
+            Circle()
+                .fill(Color.orange.opacity(0.18))
+                .frame(width: 280, height: 280)
+                .blur(radius: 90)
+                .offset(x: 160, y: 260)
+        }
+        .ignoresSafeArea()
+    }
+}
+
+struct PrimaryControlButtonStyle: ButtonStyle {
+    var isDestructive = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(isDestructive ? .white : Color(red: 0.02, green: 0.07, blue: 0.08))
+            .background(
+                LinearGradient(
+                    colors: isDestructive ? [Color(red: 0.92, green: 0.24, blue: 0.35), Color(red: 0.98, green: 0.48, blue: 0.54)] : [Color(red: 0.39, green: 0.96, blue: 0.88), Color(red: 0.82, green: 0.94, blue: 0.45)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+            )
+            .shadow(color: (isDestructive ? Color.red : Color.cyan).opacity(0.22), radius: 18, x: 0, y: 12)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.spring(response: 0.24, dampingFraction: 0.80), value: configuration.isPressed)
+    }
+}
+
+struct SecondaryControlButtonStyle: ButtonStyle {
+    var accent: Color = .cyan
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.subheadline.weight(.bold))
+            .foregroundStyle(.white)
+            .background(accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .stroke(accent.opacity(0.26), lineWidth: 1)
+            }
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.spring(response: 0.24, dampingFraction: 0.80), value: configuration.isPressed)
+    }
+}
+
+private extension StreamPreset {
+    var displayName: String {
+        switch self {
+        case .hd720p30:
+            return "720p"
+        case .hd1080p30:
+            return "1080p"
+        }
+    }
+}
+
+private struct LayoutMetrics {
+    let horizontalPadding: CGFloat
+    let topPadding: CGFloat
+    let bottomPadding: CGFloat
+    let sectionSpacing: CGFloat
+    let previewHeight: CGFloat
+    let previewCornerRadius: CGFloat
+    let primaryButtonHeight: CGFloat
+    let secondaryButtonHeight: CGFloat
+    let iconButtonSize: CGFloat
+    let brandSize: CGFloat
+    let heroTitleSize: CGFloat
+
+    init(geometry: GeometryProxy) {
+        let width = geometry.size.width
+        let height = geometry.size.height
+        let safeTop = geometry.safeAreaInsets.top
+        let safeBottom = geometry.safeAreaInsets.bottom
+        let compactHeight = height < 760
+        let compactWidth = width < 390
+
+        horizontalPadding = compactWidth ? 16 : 20
+        topPadding = max(safeTop, 12) + 10
+        bottomPadding = max(safeBottom, 18) + 14
+        sectionSpacing = compactHeight ? 14 : 18
+        previewHeight = min(max(height * (compactHeight ? 0.38 : 0.42), 300), compactHeight ? 360 : 430)
+        previewCornerRadius = compactWidth ? 26 : 32
+        primaryButtonHeight = compactHeight ? 52 : 58
+        secondaryButtonHeight = compactHeight ? 46 : 50
+        iconButtonSize = compactWidth ? 48 : 52
+        brandSize = compactWidth ? 28 : 34
+        heroTitleSize = compactWidth ? 26 : 32
     }
 }
 
@@ -83,17 +601,41 @@ final class PreviewView: UIView {
     }
 }
 
-
 struct WebRTCSenderView: UIViewRepresentable {
     let hostAddress: String
+    let initialFacing: String
+    let initialQuality: Int
+    let onStatus: (String) -> Void
+    let onConfig: (String, Int) -> Void
+
+    init(
+        hostAddress: String,
+        initialFacing: String,
+        initialQuality: Int,
+        onStatus: @escaping (String) -> Void,
+        onConfig: @escaping (String, Int) -> Void
+    ) {
+        self.hostAddress = hostAddress
+        self.initialFacing = initialFacing
+        self.initialQuality = initialQuality
+        self.onStatus = onStatus
+        self.onConfig = onConfig
+    }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(hostAddress: hostAddress)
+        Coordinator(hostAddress: hostAddress, onStatus: onStatus, onConfig: onConfig)
     }
 
     func makeUIView(context: Context) -> WKWebView {
         let contentController = WKUserContentController()
         contentController.add(context.coordinator, name: "signal")
+        contentController.add(context.coordinator, name: "status")
+        contentController.add(context.coordinator, name: "config")
+
+        let facingLiteral = initialFacing == "user" ? "user" : "environment"
+        let quality = initialQuality == 1080 ? 1080 : 720
+        let seedScript = "window.__initialFacing = '\(facingLiteral)'; window.__initialQuality = \(quality);"
+        contentController.addUserScript(WKUserScript(source: seedScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         let configuration = WKWebViewConfiguration()
         configuration.allowsInlineMediaPlayback = true
@@ -105,8 +647,6 @@ struct WebRTCSenderView: UIViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = false
         context.coordinator.webView = webView
-        // iOS auto-lock (default 30s) suspends the web view and kills the stream;
-        // keep the screen awake while the sender sheet is open.
         UIApplication.shared.isIdleTimerDisabled = true
         loadSenderPage(in: webView)
         return webView
@@ -126,13 +666,33 @@ struct WebRTCSenderView: UIViewRepresentable {
 
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
         var hostAddress: String
+        let onStatus: (String) -> Void
+        let onConfig: (String, Int) -> Void
         weak var webView: WKWebView?
 
-        init(hostAddress: String) {
+        init(hostAddress: String, onStatus: @escaping (String) -> Void, onConfig: @escaping (String, Int) -> Void) {
             self.hostAddress = hostAddress
+            self.onStatus = onStatus
+            self.onConfig = onConfig
         }
 
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+            if message.name == "status" {
+                if let text = message.body as? String {
+                    Task { @MainActor in self.onStatus(text) }
+                }
+                return
+            }
+
+            if message.name == "config" {
+                if let payload = message.body as? [String: Any],
+                   let facing = payload["facing"] as? String,
+                   let quality = payload["quality"] as? Int {
+                    Task { @MainActor in self.onConfig(facing, quality) }
+                }
+                return
+            }
+
             guard message.name == "signal",
                   let payload = message.body as? [String: Any],
                   let id = payload["id"] as? String,
@@ -192,32 +752,141 @@ struct WebRTCSenderView: UIViewRepresentable {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>iPhone WebRTC Sender</title>
   <style>
-    :root { color-scheme: dark; --ink: #f5efe2; --muted: #c9bfae; --panel: rgba(22, 28, 30, .78); --line: rgba(255,255,255,.14); }
+    :root {
+      color-scheme: dark;
+      --ink: #f5efe2;
+      --muted: #c9bfae;
+      --panel: rgba(22, 28, 30, .78);
+      --line: rgba(255,255,255,.14);
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; font-family: Avenir Next, ui-rounded, system-ui, sans-serif; color: var(--ink); background: radial-gradient(circle at top left, #2d4d48, transparent 34rem), linear-gradient(135deg, #101719, #202319 55%, #3b2f1f); overflow: hidden; }
-    video { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #050708; }
-    .panel { position: fixed; left: 18px; right: 18px; bottom: 18px; max-width: 620px; padding: 18px; border: 1px solid var(--line); border-radius: 22px; background: var(--panel); backdrop-filter: blur(18px); box-shadow: 0 20px 70px rgba(0,0,0,.35); }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Avenir Next, ui-rounded, system-ui, sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top left, #2d4d48, transparent 34rem), linear-gradient(135deg, #101719, #202319 55%, #3b2f1f);
+      overflow: hidden;
+    }
+    video {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      background: #050708;
+    }
+    .panel {
+      position: fixed;
+      left: 18px;
+      right: 18px;
+      bottom: 18px;
+      max-width: 620px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--panel);
+      backdrop-filter: blur(18px);
+      box-shadow: 0 20px 70px rgba(0,0,0,.35);
+    }
     h1 { margin: 0 0 8px; font-size: clamp(24px, 5vw, 42px); letter-spacing: -.04em; }
     p { margin: 0 0 14px; color: var(--muted); line-height: 1.45; }
-    button { border: 0; border-radius: 999px; padding: 12px 16px; color: #14201d; background: #f2c46d; font: inherit; font-weight: 700; }
+    button {
+      border: 0;
+      border-radius: 999px;
+      padding: 12px 16px;
+      color: #14201d;
+      background: #f2c46d;
+      font: inherit;
+      font-weight: 700;
+    }
     button:disabled { opacity: .5; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .row #start { flex: 1 1 auto; }
+    button.ghost {
+      color: var(--ink);
+      background: rgba(255,255,255,.10);
+      border: 1px solid var(--line);
+    }
   </style>
 </head>
 <body>
   <video id="local" autoplay playsinline muted></video>
   <div class="panel">
     <h1>iPhone Sender</h1>
-    <p id="status">Ready to start the WebRTC camera stream.</p>
-    <button id="start">Start WebRTC stream</button>
+    <p id="status">Ready to start the WebRTC camera stream to the configured host.</p>
+    <div class="row">
+      <button id="start">Start WebRTC stream</button>
+      <button id="flip" class="ghost">Flip camera</button>
+      <button id="quality" class="ghost">720p</button>
+    </div>
   </div>
   <script>
     const statusEl = document.querySelector('#status');
     const local = document.querySelector('#local');
+    const startButton = document.querySelector('#start');
+    const flipButton = document.querySelector('#flip');
+    const qualityButton = document.querySelector('#quality');
     const pendingSignals = new Map();
     let seenReceiverCandidates = new Set();
     let pc;
     let stream;
     let restartTimer = null;
+    let currentFacing = window.__initialFacing === 'user' ? 'user' : 'environment';
+    let currentQuality = window.__initialQuality === 1080 ? 1080 : 720;
+
+    function setStatus(message) {
+      statusEl.textContent = message;
+      try { window.webkit.messageHandlers.status.postMessage(message); } catch (e) {}
+    }
+
+    function reportConfig() {
+      try {
+        window.webkit.messageHandlers.config.postMessage({ facing: currentFacing, quality: currentQuality });
+      } catch (e) {}
+    }
+
+    function updateControlLabels() {
+      qualityButton.textContent = currentQuality + 'p';
+      flipButton.textContent = currentFacing === 'user' ? 'Front camera' : 'Back camera';
+    }
+
+    function videoConstraints() {
+      const dims = currentQuality === 1080 ? { w: 1920, h: 1080 } : { w: 1280, h: 720 };
+      return {
+        facingMode: { ideal: currentFacing },
+        width: { ideal: dims.w },
+        height: { ideal: dims.h },
+        frameRate: { ideal: 30, max: 30 }
+      };
+    }
+
+    // Live camera/quality change: re-capture and hot-swap the outgoing track without
+    // renegotiating. If we are not streaming yet, the new settings apply on the next start().
+    async function applyCameraChange() {
+      updateControlLabels();
+      reportConfig();
+      if (!pc || !stream) return;
+      flipButton.disabled = true;
+      qualityButton.disabled = true;
+      try {
+        const newStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints() });
+        const newTrack = newStream.getVideoTracks()[0];
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
+        if (sender) await sender.replaceTrack(newTrack);
+        for (const track of stream.getTracks()) track.stop();
+        stream = newStream;
+        local.srcObject = stream;
+        await local.play().catch(() => {});
+        newTrack.addEventListener('ended', () => scheduleRestart('camera stopped'));
+        setStatus('Streaming to Windows over WebRTC.');
+      } catch (error) {
+        setStatus('Camera switch failed: ' + (error && error.message ? error.message : error));
+      } finally {
+        flipButton.disabled = false;
+        qualityButton.disabled = false;
+      }
+    }
 
     window.__signalResponse = (id, status, text) => {
       const pending = pendingSignals.get(id);
@@ -232,7 +901,6 @@ struct WebRTCSenderView: UIViewRepresentable {
     };
 
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-    const setStatus = text => statusEl.textContent = text;
     const signal = (method, path, body = null) => new Promise((resolve, reject) => {
       const id = String(Date.now()) + '-' + String(Math.random());
       pendingSignals.set(id, { resolve, reject });
@@ -257,7 +925,7 @@ struct WebRTCSenderView: UIViewRepresentable {
     }
 
     async function start() {
-      document.querySelector('#start').disabled = true;
+      startButton.disabled = true;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         throw new Error('This iPhone WebView still does not expose camera capture to WebRTC.');
       }
@@ -292,16 +960,9 @@ struct WebRTCSenderView: UIViewRepresentable {
         if (event.candidate) signalJson('POST', '/signal/candidate/phone', event.candidate.toJSON()).catch(console.error);
       };
 
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 30, max: 30 }
-        }
-      });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints() });
       local.srcObject = stream;
+      await local.play().catch(() => {});
       for (const track of stream.getTracks()) {
         track.addEventListener('ended', () => scheduleRestart('camera stopped'));
         activePc.addTrack(track, stream);
@@ -319,6 +980,7 @@ struct WebRTCSenderView: UIViewRepresentable {
         await sleep(500);
       }
       setStatus('Streaming to Windows over WebRTC.');
+      reportConfig();
       pollReceiverCandidates(activePc);
     }
 
@@ -345,10 +1007,23 @@ struct WebRTCSenderView: UIViewRepresentable {
       if (pc && ['failed', 'disconnected', 'closed'].includes(pc.connectionState)) scheduleRestart('app resumed');
     });
 
-    document.querySelector('#start').addEventListener('click', () => start().catch(error => {
-      document.querySelector('#start').disabled = false;
-      setStatus('Failed: ' + error.message);
+    startButton.addEventListener('click', () => start().catch(error => {
+      startButton.disabled = false;
+      setStatus(error && error.message ? error.message : 'Unable to access the camera.');
     }));
+
+    flipButton.addEventListener('click', () => {
+      currentFacing = currentFacing === 'user' ? 'environment' : 'user';
+      applyCameraChange();
+    });
+
+    qualityButton.addEventListener('click', () => {
+      currentQuality = currentQuality === 720 ? 1080 : 720;
+      applyCameraChange();
+    });
+
+    updateControlLabels();
+    reportConfig();
   </script>
 </body>
 </html>
