@@ -1,49 +1,46 @@
-# Windows Host Setup
+# Windows Host
 
-This is the Windows receiver for the iPhone camera stream.
+This crate is the Windows side of BonCam.
 
-## What it does today
+It currently handles:
 
-- Accepts a TCP control connection on port `41000`
-- Accepts UDP video packets on port `41001`
-- Stores paired device info in `paired-devices.json`
-- Logs pairing and stream lifecycle events
+- TCP control messages on port `41000`
+- UDP video packets on port `41001`
+- Pairing state persisted to `paired-devices.json`
+- Preview and lifecycle logging
+- WebRTC receiver and signaling on port `41003`
 
-## Before you run it
+## How To Run It
 
-1. Install Rust using rustup: https://rustup.rs/
-2. Open a new PowerShell window after installation.
-3. Allow private-network firewall access when Windows prompts you.
-
-## Quick start
-
-From the workspace root, run:
+From the workspace root:
 
 ```powershell
 .\scripts\run-windows-host.ps1
 ```
 
-If you want to pre-open firewall ports first, run PowerShell as Administrator and run:
+If you prefer to open the ports ahead of time, run:
 
 ```powershell
 .\scripts\setup-windows-firewall.ps1
 ```
 
-## What success looks like
+## What A Healthy Start Looks Like
 
-When the host starts correctly, you should see logs indicating that it is listening on TCP `41000` and UDP `41001`.
-When the iPhone app connects, you should see control connection, pairing, and stream-start logs.
+- The host reports that it is listening on `41000` and `41001`
+- Pairing events appear when the iPhone app connects
+- Stream-start and frame-receive logs appear after the handshake
 
-## Current limitation
+## WebRTC Receiver
 
-The Windows host currently receives video frames but does not display them in a real preview window yet. This milestone is focused on receiving and validating the stream.
-
-
-## WebRTC receiver
-
-The host also serves a WebRTC receiver and signaling endpoints on TCP 41003:
+The host also exposes a WebRTC receiver and signaling endpoint on `41003`:
 
 - Receiver page: `http://127.0.0.1:41003/receiver`
-- iPhone sender page: `http://<windows-ip>:41003/phone`
+- Sender page: `http://<windows-ip>:41003/phone`
 
-This path is intended to replace the custom H.264 socket preview once the iPhone sender is stable.
+This path is meant to evolve into the lower-latency replacement for the custom socket-based preview path.
+
+## Current Scope
+
+- The host is focused on receiving, validating, and bridging the stream.
+- The full virtual camera surface is still being built out.
+- The preview pipeline exists, but the final Windows-facing experience is still in progress.

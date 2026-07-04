@@ -1,51 +1,77 @@
 # Windows Quick Start
 
-## 1. Install Rust
-- Go to [rustup.rs](https://rustup.rs/)
-- Install the default toolchain
-- Close and reopen PowerShell
+Use this when you want the fastest path from a fresh Windows machine to a running host.
 
-## 2. Open the project folder in PowerShell
-- Change into this folder:
-- `C:\Users\benje\Documents\Iphone Camera Streaming`
+## Before You Start
 
-## 3. Optional: open the firewall ports
-- Right-click PowerShell and choose **Run as administrator**
-- Run:
-- `.\scripts\setup-windows-firewall.ps1`
+- Install the Rust toolchain from [rustup.rs](https://rustup.rs/)
+- Reopen PowerShell after installation so `cargo` is available
+- Make sure you are in this repository folder
 
-## 4. Find your Windows laptop IP
-- Run:
-- `.\scripts\show-windows-ip.ps1`
-- Use the Wi-Fi IPv4 address in the iPhone app
+```powershell
+cd "C:\Users\benje\Documents\Iphone Camera Streaming"
+```
 
-## 5. Start the Windows host
-- Run:
-- `.\scripts\run-windows-host.ps1`
+## Optional Setup
 
-## 6. Leave that PowerShell window open
-- The iPhone app will connect to this process
-- Current ports:
-- TCP `41000`
-- TCP `41001`
-- TCP `41003`
+If you want to pre-create firewall rules before running the host, launch PowerShell as Administrator and run:
 
-## 7. On the iPhone app
+```powershell
+.\scripts\setup-windows-firewall.ps1
+```
+
+If Windows asks whether to allow network access later, allow it on private networks.
+
+## Find The Host IP
+
+Run:
+
+```powershell
+.\scripts\show-windows-ip.ps1
+```
+
+Use the Wi-Fi IPv4 address in the iPhone app.
+
+## Start The Host
+
+Run:
+
+```powershell
+.\scripts\run-windows-host.ps1
+```
+
+Leave that PowerShell window open while the phone connects.
+
+## Connect The iPhone
+
+- Open the iPhone app
 - Enter the Windows IP address
-- Tap **Start**
-- Confirm the Windows console shows pairing and stream logs
+- Tap the start button
+- Confirm the host console shows pairing and stream logs
 
-## Notes
-- The legacy socket path still exists for comparison, and the new WebRTC path is available on TCP 41003.
-- If Windows Defender asks about network access, allow it on **Private networks**.
+## Ports In Use
 
+- `41000` - TCP control channel
+- `41001` - UDP video channel
+- `41003` - WebRTC signaling and receiver HTTP server
 
-## WebRTC test path
+## WebRTC Receiver Path
 
-This is the newer low-latency path. Keep the Windows host running, then open this page on the Windows machine:
+With the host running, open this page on the Windows machine:
 
-`http://127.0.0.1:41003/receiver`
+```text
+http://127.0.0.1:41003/receiver
+```
 
-On the iPhone app, enter the Windows machine IP address as before, then tap **Open WebRTC Sender**. In the sender sheet, tap **Start WebRTC stream** and allow camera access if prompted.
+Then on the iPhone app:
 
-If the sender page opens but camera access is refused, the next development step is to switch the dev sender page from local HTTP to either an embedded app page or local HTTPS. The signaling and Windows receiver are already separated so that change is small.
+- Enter the Windows IP address
+- Open the WebRTC sender
+- Start the WebRTC stream
+- Allow camera access if prompted
+
+## Troubleshooting
+
+- If the app cannot connect, confirm the IP address is correct.
+- If Windows Defender blocks access, allow the host on private networks.
+- If the receiver page is left open in the background, keep it visible so the browser does not suspend it.

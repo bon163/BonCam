@@ -2,50 +2,57 @@
 
 BonCam is a Windows-first iPhone camera streaming project.
 
-It is split into a few pieces:
+The repository is organized around a simple path:
 
-- `ios-app/` - the native iPhone sender app
-- `windows-host/` - the Windows receiver, preview, and WebRTC host
-- `windows-virtual-camera/` - the DirectShow / virtual camera implementation
-- `shared/` - protocol definitions and shared docs
-- `scripts/` - setup and launch helpers for Windows
+- The iPhone captures and sends camera video.
+- The Windows host receives, previews, and bridges the stream.
+- Shared Rust types keep the control protocol consistent.
+- Windows virtual camera work lives alongside the host so the pipeline can grow into a system-wide camera source.
 
-## What It Does
+## At A Glance
 
-- Streams camera video from an iPhone to a Windows machine
-- Uses a shared control protocol for pairing and stream state
-- Supports a Windows preview path
-- Includes a WebRTC-based receiver path on TCP port `41003`
-- Includes the groundwork for a Windows virtual camera device
+- iPhone sender app in SwiftUI
+- Windows host in Rust
+- Shared control protocol in Rust
+- WebRTC signaling and receiver path on TCP `41003`
+- Windows preview and virtual camera scaffolding
+
+## Repository Layout
+
+- `ios-app/` - native iPhone sender app and Xcode project
+- `windows-host/` - Windows receiver, preview, and WebRTC host
+- `windows-virtual-camera/` - DirectShow and virtual camera source code
+- `shared/` - protocol definitions and supporting documentation
+- `scripts/` - PowerShell helpers for Windows setup and launch
 
 ## Requirements
 
 - Windows 10 or Windows 11 for the host machine
-- Rust toolchain via [rustup](https://rustup.rs/)
-- Xcode on macOS for building the iPhone app
+- Rust toolchain installed through [rustup](https://rustup.rs/)
+- Xcode on macOS for building and signing the iPhone app
 - An iPhone for running the sender app
 
 ## Quick Start
 
-### Windows host
+### 1. Start the Windows host
 
-From the workspace root, run:
+From the workspace root:
 
 ```powershell
 .\scripts\run-windows-host.ps1
 ```
 
-If Windows asks for firewall access, allow it on private networks.
+If Windows prompts for network access, allow it on private networks.
 
-### Optional firewall setup
+### 2. Optional firewall setup
 
-Run PowerShell as Administrator and execute:
+If you want to pre-open the host ports, run PowerShell as Administrator and execute:
 
 ```powershell
 .\scripts\setup-windows-firewall.ps1
 ```
 
-### Find the host IP
+### 3. Find the Windows IP address
 
 ```powershell
 .\scripts\show-windows-ip.ps1
@@ -53,9 +60,9 @@ Run PowerShell as Administrator and execute:
 
 Use the Wi-Fi IPv4 address in the iPhone app.
 
-### iPhone app
+### 4. Build and run the iPhone app
 
-Open `ios-app/IPhoneCamSender.xcodeproj` in Xcode, select your signing team, and run it on an iPhone.
+Open `ios-app/IPhoneCamSender.xcodeproj` in Xcode, choose your signing team, and run it on a connected iPhone.
 
 ## Ports
 
@@ -67,13 +74,28 @@ Open `ios-app/IPhoneCamSender.xcodeproj` in Xcode, select your signing team, and
 ## Documentation
 
 - [Windows quick start](./WINDOWS_QUICKSTART.md)
-- [Root handoff notes](./HANDOFF.md)
-- [Shared protocol docs](./shared/docs/protocol.md)
 - [Windows host notes](./windows-host/README.md)
 - [iPhone app notes](./ios-app/README.md)
+- [Shared protocol docs](./shared/docs/protocol.md)
+- [Project handoff notes](./HANDOFF.md)
 
-## Notes
+## Current Status
+
+- The control protocol and shared types are in place.
+- The Windows host can receive the stream and expose a WebRTC receiver path.
+- The iPhone app includes capture, encoding, and transport code.
+- The virtual camera layer is scaffolded and ready for continued implementation.
+
+## Housekeeping
 
 - `paired-devices.json` is generated at runtime and ignored by Git.
-- Build output lives under `target/` and should not be committed.
-- The repository currently includes the Windows host, iPhone sender, and virtual camera scaffolding, but the pieces still need to be built and tested together on their target platforms.
+- Build output under `target/` is ignored.
+- Local helper tools under `.tools/` are ignored.
+- Generated `.obj` files are ignored so the repository stays source-only.
+
+## Suggested Next Steps
+
+1. Run the Windows host and confirm it starts cleanly.
+2. Open the iPhone app in Xcode and verify signing and camera permissions.
+3. Confirm the protocol handshake between phone and host.
+4. Continue the virtual camera and preview work once the stream path is stable.

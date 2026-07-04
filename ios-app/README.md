@@ -1,13 +1,23 @@
 # iPhone Sender App
 
-Open `IPhoneCamSender.xcodeproj` in Xcode on a Mac, select your development team, and run on an iPhone.
+This folder contains the native iPhone sender for BonCam.
 
-The app currently includes:
+## Open And Run
 
-- Camera preview
-- Front/back camera switching
+1. Open `IPhoneCamSender.xcodeproj` in Xcode on a Mac.
+2. Select your development team.
+3. Run the app on a connected iPhone.
+
+## What The App Includes
+
+- Live camera preview
+- Front and back camera switching
 - `720p30` and `1080p30` presets
 - TCP control handshake
 - UDP H.264 frame transport
 
-The host IP is currently editable in the app UI and defaults to `192.168.1.10`.
+## Notes
+
+- The host IP is editable in the UI.
+- The default value is `192.168.1.10`.
+- Camera and network permissions must be approved on the device.
