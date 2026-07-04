@@ -5,7 +5,11 @@ import UIKit
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var hostAddress = "192.168.1.10"
+    @Published var hostAddress = "192.168.1.10" {
+        didSet {
+            UserDefaults.standard.set(hostAddress, forKey: Self.hostAddressDefaultsKey)
+        }
+    }
     @Published var pairCode = ""
     @Published var connectionState = "Idle"
     @Published var selectedPreset: StreamPreset = .hd720p30
@@ -14,9 +18,11 @@ final class AppModel: ObservableObject {
 
     let captureManager = CaptureManager()
     let transport = StreamTransport()
+    private static let hostAddressDefaultsKey = "hostAddress"
     private var cancellables = Set<AnyCancellable>()
 
     init() {
+        hostAddress = UserDefaults.standard.string(forKey: Self.hostAddressDefaultsKey) ?? hostAddress
         captureManager.delegate = self
         Task { await transport.setDelegate(self) }
         observeLifecycle()
