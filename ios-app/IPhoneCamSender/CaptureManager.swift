@@ -106,6 +106,10 @@ final class CaptureManager: NSObject {
 
 extension CaptureManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // The in-app hero preview renders straight from the session via
+        // AVCaptureVideoPreviewLayer, so skip encoding entirely unless a delegate is
+        // actually consuming encoded frames (avoids running H.264 for nothing).
+        guard delegate != nil else { return }
         encoder?.encode(sampleBuffer: sampleBuffer)
         previewEncoder?.maybeEncode(sampleBuffer: sampleBuffer)
     }
