@@ -1,6 +1,73 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (merged to `main`: RTCP PLI keyframe recovery + in-camera signal-lost overlay)
+Last updated: 2026-07-05 (branch `single-start-script`: one-command start.ps1)
+
+## 2026-07-05: `start.ps1` — one command to run everything
+
+New repo-root script `start.ps1` collapses the whole test setup into a single
+command the user runs from a normal PowerShell: `.\start.ps1`. Motivation: the
+user should never have to remember the separate install / register / host steps.
+
+What it does (see the header comment in the file):
+- Self-elevates with a single UAC prompt (admin is required to register the camera
+  for ALL users, which is what new Teams needs — see the Teams note in the backlog).
+  Re-launches itself with `-NoExit` so the elevated window stays up.
+- Prints the bare LAN IP to type into the iPhone app (DHCP IPv4, skips 169.254
+  link-local, prefers Wi-Fi). Verified it resolves 192.168.1.227 on this machine.
+- Ensures the machine-wide DLL is installed (`source\install-machine.ps1`); skips
+  the build if `ProgramData\...\iphone_camera_source.dll` already exists unless
+  `-Rebuild` is passed.
+- Registers the camera all-users/system by launching `register_virtual_camera.exe
+  start all-users system` HIDDEN with `-PassThru`, keeping the process handle.
+- Runs the host (`cargo run -p windows-host`, `+ --release` with `-Release`) in the
+  FOREGROUND so its log is what you watch.
+- On Ctrl+C / exit, a `finally` block kills the registrar process and runs
+  `register_virtual_camera.exe remove all-users system` to unregister the camera.
+
+Switches: `-Rebuild` (force DLL rebuild+reinstall), `-Release` (optimised host).
+
+Status: syntax-checked (PowerShell parser clean) and the non-elevated parts (IP
+detection, admin check, all referenced exe/script paths, cargo on PATH) verified.
+NOT yet run end-to-end through the UAC/elevation + registrar + host path — that
+needs an interactive run. Known caveats to watch on first real run: (a) the host
+now runs ELEVATED (cargo build/run as admin) — fine functionally, but if it ever
+fights the target dir with a non-elevated `cargo check` from a dev session, that's
+why; (b) `finally` teardown on Ctrl+C is reliable in most cases but not 100% — if
+it's skipped, the camera stays registered and the next run (or `registrar\
+run-remove.ps1`) cleans it up.
+
+## Backlog / things to look at next
+
+- **Per-frame CPU/allocation overhead in the DLL (efficiency).** Measured live
+  while streaming to Discord: our `windows-host` is cheap (~2.5% CPU, 54 MB) — the
+  high CPU + ~0.5 GB the user sees is DISCORD's own process (pid was at 52.8% CPU /
+  505 MB), i.e. Discord re-encoding the outgoing video, which any webcam would
+  incur. BUT our DLL does add real churn to whichever process hosts it: every
+  `RequestSample` (30fps) it `new`/`delete`s a ~3.7 MB buffer
+  (`iphone_camera_source.cpp` ~line 291, `fileBuffer`) and re-reads + RGBA→NV12
+  converts the whole frame. Fix to do: reuse a persistent per-stream buffer instead
+  of allocating each frame (~110 MB/s of alloc/free removed); consider caching the
+  file read / SIMD-ing the NV12 conversion. Won't change the headline (Discord's
+  encoder dominates) but removes the one genuine inefficiency in our code. Also:
+  the host under `cargo run` is a DEBUG build — use `run-windows-host.ps1 -Release`
+  for streaming.
+
+- **New Teams doesn't see the camera (Zoom does). RESOLVED 2026-07-05.** Root cause
+  (confirmed by registry): the MF source CLSID {7F812B6A-...} is registered in BOTH
+  HKLM (→ ProgramData DLL) and HKCU (→ dev source\bin DLL), so the frame server loads
+  it and Zoom (Win32) enumerates the CurrentUser/Session virtual camera fine. New
+  Teams is a PACKAGED (MSIX/AppContainer) app and only enumerates cameras registered
+  with `MFVirtualCameraAccess_AllUsers` (+ `System` lifetime). FIX CONFIRMED WORKING:
+  register with `registrar\run-start-all-users-system.ps1` from an admin prompt
+  (after `source\install-machine.ps1` so the HKLM/ProgramData DLL is current), keep
+  that window open, and fully restart Teams (it caches the device list at launch).
+  Teams then enumerates "iPhone Camera". So signing the DLL was NOT required — the
+  scope was the whole issue. NOTE: the registrar's `start` still waits for Enter and
+  Stops the camera on exit, so the camera only persists while that admin process is
+  alive; for a hands-off setup we'd want a persistent System registration that
+  doesn't tear down on exit. The dev HKCU registration shadowing the machine one for
+  the current user is also worth cleaning up (run-remove then a single machine-wide
+  install).
 
 ## 2026-07-05: RTCP PLI keyframe request — recover from mid-stream decode stalls
 
