@@ -32,6 +32,11 @@ static constexpr UINT32 MAX_RGBA_BYTES = PORTRAIT_WIDTH * PORTRAIT_HEIGHT * 4;
 static constexpr UINT32 LEGACY_RGBA_BYTES = MAX_RGBA_BYTES;
 static constexpr UINT32 FRAME_RATE = 30;
 static constexpr LONGLONG FRAME_DURATION = 10000000 / FRAME_RATE;
+// The camera advertises a 30..60 fps capability range. The nominal (default) rate
+// stays 30 so apps that just take the default media type are unchanged (Discord is
+// verified against 30) — but apps that support higher rates can negotiate up to 60,
+// which is what the phone's opt-in "60 fps" setting produces upstream.
+static constexpr UINT32 MAX_FRAME_RATE = 60;
 static constexpr wchar_t SHARED_FRAME_PATH[] = L"C:\\ProgramData\\IPhoneCameraStreaming\\latest.rgba";
 // latest.rgba: 16-byte header (magic "IPCF", width, height, stride as LE u32) then
 // tightly packed RGBA. Headerless files are the legacy fixed portrait layout.
@@ -209,6 +214,8 @@ HRESULT CreateVideoMediaType(REFGUID subtype, UINT32 width, UINT32 height, IMFMe
     if (SUCCEEDED(hr)) hr = created->SetGUID(MF_MT_SUBTYPE, subtype);
     if (SUCCEEDED(hr)) hr = MFSetAttributeSize(created, MF_MT_FRAME_SIZE, width, height);
     if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(created, MF_MT_FRAME_RATE, FRAME_RATE, 1);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(created, MF_MT_FRAME_RATE_RANGE_MIN, FRAME_RATE, 1);
+    if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(created, MF_MT_FRAME_RATE_RANGE_MAX, MAX_FRAME_RATE, 1);
     if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(created, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     if (SUCCEEDED(hr)) hr = created->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     if (SUCCEEDED(hr)) hr = created->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);

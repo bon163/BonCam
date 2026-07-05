@@ -15,13 +15,27 @@ final class AppModel: ObservableObject {
     // sender now pins a high maxBitrate so the higher resolution actually holds.
     @Published var selectedPreset: StreamPreset = .hd1080p30
     @Published var cameraPosition: CameraPosition = .back
+    // 60fps is opt-in (default 30). At a fixed bitrate 60fps halves the bits per
+    // frame, so it trades sharpness for smoothness; keep it a deliberate choice.
+    @Published var highFrameRate: Bool = false {
+        didSet {
+            UserDefaults.standard.set(highFrameRate, forKey: Self.highFrameRateDefaultsKey)
+        }
+    }
     @Published var isStreaming = false
 
     let captureManager = CaptureManager()
     private static let hostAddressDefaultsKey = "hostAddress"
+    private static let highFrameRateDefaultsKey = "highFrameRate"
+
+    /// The frame rate the WebRTC sender should target. 30 by default, 60 when the
+    /// user enables high frame rate in Settings.
+    var targetFps: Int { highFrameRate ? 60 : 30 }
 
     init() {
         hostAddress = UserDefaults.standard.string(forKey: Self.hostAddressDefaultsKey) ?? hostAddress
+        // UserDefaults.bool returns false (i.e. 30fps) when the key was never set.
+        highFrameRate = UserDefaults.standard.bool(forKey: Self.highFrameRateDefaultsKey)
     }
 
     /// Starts the native capture session that backs the in-app hero preview.
@@ -43,9 +57,10 @@ final class AppModel: ObservableObject {
 
     /// Applies a camera/quality change reported live by the WebRTC sender page so the
     /// main-screen chips (and the resumed preview) stay in sync with what is streaming.
-    func applyWebRTCConfig(facing: String, quality: Int) {
+    func applyWebRTCConfig(facing: String, quality: Int, fps: Int) {
         cameraPosition = facing == "user" ? .front : .back
         selectedPreset = quality == 1080 ? .hd1080p30 : .hd720p30
+        highFrameRate = fps >= 60
     }
 
     func switchCamera() {

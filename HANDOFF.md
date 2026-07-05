@@ -1,7 +1,41 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (quality + stability pass: pinned sender bitrate, 1080p
-default, release-by-default host, DLL per-frame buffer reuse)
+Last updated: 2026-07-05 (branch `stream-60fps-option`: in-app 60fps toggle,
+default 30; DLL advertises a 30-60 fps capability range)
+
+## 2026-07-05: in-app 60fps option (branch `stream-60fps-option`)
+
+New user-facing setting: Settings > Streaming > "60 fps" toggle. Default is 30fps
+(60 is opt-in). At a fixed bitrate 60fps halves the bits/frame, so it trades
+sharpness for smoothness — hence opt-in, not default.
+
+iOS app (needs an Xcode rebuild on the Mac to reach the phone):
+- `AppModel.highFrameRate` (persisted in UserDefaults, key `highFrameRate`,
+  defaults false=30fps) + `targetFps` computed (30/60). `applyWebRTCConfig` gained
+  an `fps` arg so the WebView can report it back.
+- `WebRTCSenderView` gained `initialFps`; seeds `window.__initialFps`. The
+  `onConfig` callback + Coordinator are now `(facing, quality, fps)`.
+- Sender JS: `currentFps` drives the getUserMedia `frameRate` constraint AND
+  `encodings[0].maxFramerate` in applyEncodingParameters; reported back via the
+  config message. No in-page fps button — it's a Settings choice, applied on the
+  next stream start.
+- SettingsView: a `Toggle` bound to `highFrameRate` + a "Frame rate" info row.
+
+Virtual-camera DLL (`iphone_camera_source.cpp`, built clean):
+- Added `MAX_FRAME_RATE = 60` and set `MF_MT_FRAME_RATE_RANGE_MIN = 30` /
+  `MF_MT_FRAME_RATE_RANGE_MAX = 60` on every media type. Nominal `MF_MT_FRAME_RATE`
+  stays 30 ON PURPOSE, so apps that take the default type are UNCHANGED (Discord is
+  verified against 30fps type 0) — but the camera now advertises up-to-60 capability.
+
+VERIFY LIVE (not yet done, no phone this session): with 60fps enabled and the
+rebuilt app, confirm the target app actually runs at 60. CAVEAT: because nominal
+stays 30, an app that ignores the frame-rate range and just takes the default type
+will still pace at 30 (phone sends 60, DLL serves newest-of-two). If a target app
+does that and you want true 60 there, the next step is either flipping nominal
+`MF_MT_FRAME_RATE` to 60 (small Discord-regression risk) or exposing dedicated
+60fps media types alongside the 30fps ones. Deploy needs `install-machine.ps1` +
+admin `Restart-Service FrameServer` for real apps (in-process probes pick it up
+without a restart).
 
 ## 2026-07-05 late: quality + stability pass ("lagging + quality dropped")
 
