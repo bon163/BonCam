@@ -1,6 +1,39 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (branch `host-native-webrtc-receive`: native in-process WebRTC receive)
+Last updated: 2026-07-05 (branch `host-webrtc-keyframe-request`: RTCP PLI keyframe recovery)
+
+## 2026-07-05: RTCP PLI keyframe request — recover from mid-stream decode stalls
+
+Branch: `host-webrtc-keyframe-request` (off `main` @ 65ccf08). Fixes the risk
+flagged in the native-receive notes below: after a live session ran fine for ~12s
+(`decode stats: decoded 423, written 362`), the openh264 decoder hit a wall of
+`h264 decode error: ... Native:18` and wrote NO more frames until the connection
+failed. Native:18 = 0x12 = `dsNoParamSets`(0x10) | `dsRefLost`(0x02): packet loss
+broke the H264 reference chain, and since P-frames can't recover without a fresh
+IDR — and iOS won't send one unprompted — every subsequent frame errored forever.
+
+Fix (`windows-host/src/webrtc_native.rs`; host-only, no phone/DLL/protocol change,
+`cargo check` clean apart from the pre-existing `latest_raw_frame` dead-code warn):
+
+- The receiver now sends an RTCP PLI (Picture Loss Indication) to make the phone
+  emit a fresh keyframe. `pump_track` gets a `Weak<RTCPeerConnection>` (Weak, not
+  Arc — the on_track closure is owned by the pc, so a strong capture would be a
+  reference-cycle leak) and spawns `request_keyframes`, which calls
+  `pc.write_rtcp(&[PictureLossIndication{ media_ssrc: track.ssrc(), .. }])`.
+- The decode thread sets a shared `want_keyframe` AtomicBool on every decode error;
+  `request_keyframes` drains it at most once per 500ms (so a sustained stall can't
+  flood the sender) and logs `requested keyframe (PLI) to re-sync decoder`.
+- `want_keyframe` is seeded `true` and tokio interval's first tick fires
+  immediately, so a PLI also goes out at track start — which additionally covers
+  joining an already-running stream mid-GOP.
+
+Status: COMPILES. NOT yet verified live — needs a phone stream that actually drops
+packets to trigger a ref loss. To verify: stream from the phone, and either let it
+run through a network blip or force one; watch host.log for `requested keyframe
+(PLI)` followed by the `decode error` lines STOPPING and `decode stats: written`
+climbing again (instead of freezing until `peer connection state failed`). The
+in-camera symptom of the OLD behaviour was the stream freezing; with the stale-
+frame overlay branch it would instead go to the signal-lost overlay after 3s.
 
 ## 2026-07-05: native in-process WebRTC receive — kills the browser receiver
 

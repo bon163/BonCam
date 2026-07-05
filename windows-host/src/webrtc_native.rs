@@ -14,7 +14,8 @@
 //! unchanged — from its side the host still just publishes an answer at
 //! GET /signal/answer and candidates at GET /signal/candidates/receiver.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -30,6 +31,7 @@ use webrtc::{
         configuration::RTCConfiguration, peer_connection_state::RTCPeerConnectionState,
         sdp::session_description::RTCSessionDescription, RTCPeerConnection,
     },
+    rtcp::payload_feedbacks::picture_loss_indication::PictureLossIndication,
     rtp::{codecs::h264::H264Packet, packetizer::Depacketizer},
     track::track_remote::TrackRemote,
 };
@@ -132,15 +134,21 @@ impl NativeWebRtcReceiver {
         }));
 
         // The remote video track: decode it in-process and feed the preview sink.
+        // pump_track needs to send RTCP keyframe requests (PLI) back to the phone,
+        // so give it a Weak handle to the pc. Weak (not Arc) because the closure is
+        // owned by the pc — a strong capture would be a reference cycle that leaks
+        // the peer connection for the process lifetime.
         let preview = self.preview.clone();
         let handle = Handle::current();
+        let pc_weak = Arc::downgrade(&pc);
         pc.on_track(Box::new(move |track, _receiver, _transceiver| {
             let preview = preview.clone();
             let handle = handle.clone();
+            let pc_weak = pc_weak.clone();
             Box::pin(async move {
                 let mime = track.codec().capability.mime_type;
                 info!("native webrtc: remote track added ({mime})");
-                tokio::spawn(pump_track(track, preview, handle));
+                tokio::spawn(pump_track(track, preview, handle, pc_weak));
             })
         }));
 
@@ -212,7 +220,7 @@ impl NativeWebRtcReceiver {
 /// Read an H264 RTP track, reassemble access units, and hand each to a decode
 /// thread. read_rtp is async and the openh264 Decoder is not Send-friendly across
 /// awaits, so decoding runs on a dedicated std thread (mirrors preview.rs).
-async fn pump_track(track: Arc<TrackRemote>, preview: Arc<PreviewSink>, handle: Handle) {
+async fn pump_track(track: Arc<TrackRemote>, preview: Arc<PreviewSink>, handle: Handle, pc: Weak<RTCPeerConnection>) {
     let mime = track.codec().capability.mime_type.to_ascii_lowercase();
     if !mime.contains("h264") {
         warn!("native webrtc: unsupported track codec {mime}; only H264 is decoded");
@@ -225,7 +233,15 @@ async fn pump_track(track: Arc<TrackRemote>, preview: Arc<PreviewSink>, handle: 
     // in the periodic stats line instead.
     let backlog = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let backlog_rx = backlog.clone();
-    std::thread::spawn(move || decode_loop(rx, backlog_rx, preview, handle));
+    // Set by the decode thread whenever it can't decode (a lost reference or
+    // missing SPS/PPS after packet loss). H264 P-frames can never recover from a
+    // broken reference chain on their own, and iOS won't emit a fresh IDR unless
+    // asked — so we request a keyframe via RTCP PLI. Seeded true so the very first
+    // thing we do is ask for a keyframe, which also covers joining mid-stream.
+    let want_keyframe = Arc::new(AtomicBool::new(true));
+    tokio::spawn(request_keyframes(pc, track.ssrc(), want_keyframe.clone()));
+    let want_keyframe_decode = want_keyframe.clone();
+    std::thread::spawn(move || decode_loop(rx, backlog_rx, preview, handle, want_keyframe_decode));
 
     let mut depacketizer = H264Packet::default();
     let mut access_unit: Vec<u8> = Vec::new();
@@ -257,6 +273,31 @@ async fn pump_track(track: Arc<TrackRemote>, preview: Arc<PreviewSink>, handle: 
     }
 }
 
+/// Sends an RTCP PLI (Picture Loss Indication) to the phone whenever the decoder
+/// asks for a keyframe, throttled to at most one per interval so a sustained
+/// stall can't flood the sender. iOS answers a PLI by emitting a fresh IDR, which
+/// re-seeds the decoder's reference chain after packet loss (the fix for the
+/// `Native:18` dsRefLost|dsNoParamSets spiral). Exits once the pc is dropped.
+async fn request_keyframes(pc: Weak<RTCPeerConnection>, media_ssrc: u32, want_keyframe: Arc<AtomicBool>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    loop {
+        // The first tick completes immediately, so the seeded `true` fires an
+        // initial keyframe request as soon as the track is up.
+        interval.tick().await;
+        let Some(pc) = pc.upgrade() else {
+            break;
+        };
+        if !want_keyframe.swap(false, Ordering::Relaxed) {
+            continue;
+        }
+        let pli = PictureLossIndication { sender_ssrc: 0, media_ssrc };
+        match pc.write_rtcp(&[Box::new(pli)]).await {
+            Ok(_) => info!("native webrtc: requested keyframe (PLI) to re-sync decoder"),
+            Err(err) => warn!("native webrtc: send keyframe request (PLI) failed: {err}"),
+        }
+    }
+}
+
 /// Owns the openh264 decoder, converts decoded frames to RGBA, and writes them to
 /// the shared preview sink (which persists latest.rgba for the virtual camera).
 ///
@@ -272,8 +313,9 @@ fn decode_loop(
     backlog: Arc<std::sync::atomic::AtomicUsize>,
     preview: Arc<PreviewSink>,
     handle: Handle,
+    want_keyframe: Arc<AtomicBool>,
 ) {
-    use std::sync::{atomic::Ordering, mpsc::TryRecvError};
+    use std::sync::mpsc::TryRecvError;
     use std::time::{Duration, Instant};
 
     let mut decoder = match Decoder::new() {
@@ -321,6 +363,10 @@ fn decode_loop(
                 }
                 Ok(None) => {}
                 Err(err) => {
+                    // The reference chain is broken (or SPS/PPS were lost): ask the
+                    // sender for a fresh keyframe so the stream can re-sync instead
+                    // of erroring on every P-frame until the connection dies.
+                    want_keyframe.store(true, Ordering::Relaxed);
                     if last_error_log.elapsed() >= Duration::from_millis(500) {
                         warn!("native webrtc: h264 decode error: {err}");
                         last_error_log = Instant::now();
