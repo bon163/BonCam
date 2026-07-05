@@ -6,6 +6,7 @@ mod preview_http;
 mod video;
 mod virtual_camera;
 mod webrtc_http;
+mod webrtc_native;
 
 use std::{
     fs,

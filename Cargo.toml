@@ -10,6 +10,12 @@ edition = "2021"
 license = "MIT"
 version = "0.1.0"
 
+# Dependencies (openh264 decode, YUV->RGBA conversion, the webrtc/SRTP stack) are
+# far too slow at -O0 to sustain live 30fps video under `cargo run`. Optimizing
+# only dependencies keeps workspace rebuilds fast while making dev builds usable.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.dependencies]
 anyhow = "1.0"
 bytes = "1.7"

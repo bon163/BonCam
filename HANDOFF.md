@@ -1,6 +1,124 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (Codex session: iOS redesign merged to main)
+Last updated: 2026-07-05 (branch `host-native-webrtc-receive`: native in-process WebRTC receive)
+
+## 2026-07-05: native in-process WebRTC receive — kills the browser receiver
+
+Branch: `host-native-webrtc-receive` (off `main` @ c99c793). This is the durable
+fix flagged repeatedly below: the host now receives the WebRTC video track
+itself, in-process, with NO browser tab. That collapses five recurring failure
+categories at once — nobody clicking "Start bridge", Edge suspending/ freezing
+background tabs, the renderer OOM-kill near frame ~2000 (getImageData GC
+starvation), zombie-tab answer hijacking, and pc-disconnected churn — because
+none of them have a browser to happen in anymore.
+
+Design (phone client and virtual-camera DLL are UNCHANGED — same signaling
+protocol, same latest.rgba contract):
+
+- New crate dep: `webrtc = "0.17.1"` (already used transitively for the RTP
+  types; now used for the full peer connection). Adds a large dependency tree;
+  first `cargo build` is slow but `cargo check` is clean (one pre-existing
+  dead-code warning only).
+- New module `windows-host/src/webrtc_native.rs` (`NativeWebRtcReceiver`): builds
+  an `RTCPeerConnection` with default codecs+interceptors, answers the phone's
+  offer, trickles ICE, and on the incoming H264 track reassembles access units
+  (depacketize via `rtp::codecs::h264::H264Packet`, flush on the RTP marker bit)
+  and decodes them on a dedicated std thread (openh264 `Decoder`, mirroring
+  preview.rs since the decoder isn't happy across awaits). Decoded YUV → RGB8 →
+  RGBA → `preview.submit_raw_rgba_frame(...)`, which writes latest.rgba exactly
+  like the old browser bridge POST did. The decode thread uses a captured tokio
+  `Handle::block_on` to call the async submit.
+- `webrtc_http.rs` now drives the native receiver from the existing signaling
+  endpoints, so the phone sees no protocol change:
+  - POST /signal/offer → `native.accept_offer()`; the returned answer is stored
+    as the winning answer tagged `host-native`, so GET /signal/answer serves it
+    to the phone unchanged.
+  - POST /signal/candidate/phone → fed straight into the native pc (buffered if
+    it races ahead of the offer) AND still buffered for a browser fallback.
+  - GET /signal/candidates/receiver → serves the host's gathered local
+    candidates when a native session is active; else the old browser path.
+  - POST /signal/reset → tears the native pc down.
+- Graceful fallback: if the WebRTC stack fails to init, `native` is `None` and
+  the server logs a warning and behaves exactly like the old browser-receiver
+  host. The /receiver page still exists and its answers are simply ignored while
+  a native session owns the `host-native` winner slot (arbitration already
+  handled zombie tabs), so an open /receiver tab is now inert, not harmful.
+
+Status: COMPILES (`cargo check -p windows-host` clean). NOT yet verified live —
+needs a phone (or Edge fake-camera /phone sender) to POST a real offer so the
+native pc negotiates and a track flows. To verify:
+
+1. `cargo run -p windows-host` (no browser /receiver needed anymore).
+2. Phone: open http://<windows-ip>:41003/phone in the app, Start WebRTC stream.
+3. Watch host.log for: `native webrtc: answered phone offer as host-native`,
+   `native webrtc: peer connection state connected`, `native webrtc: remote
+   track added (video/H264)`, then the raw-frame watchdog `raw bridge frames
+   FLOWING`. Check `latest.rgba` LastWriteTime advances and /virtual-camera/status
+   shows raw_frames_ready.
+
+Known risks to check first if no video: (a) H264 codec/fmtp negotiation — iOS
+offers a specific profile-level-id; if webrtc-rs's default H264 registration
+doesn't match, no track fires (`remote track added` never logs) and we'd need to
+register the phone's exact H264 params in the MediaEngine. (b) The decode thread
+expects the first access unit to carry SPS/PPS/IDR (iOS does send them inband).
+Rate-limited `native webrtc: h264 decode error` lines would show a decode
+mismatch. (c) `on_track` only decodes `video/H264`; a VP8 fallback would be
+skipped with a warning.
+
+### VERIFIED LIVE 2026-07-05 + lag fix
+
+The native receive worked out of the box on the first live run (phone offer →
+host answers → track flows → latest.rgba updates) but drifted 30-60s BEHIND the
+camera. Cause: the first decode_loop played the stream faithfully instead of
+latest-wins. Every access unit went through an unbounded channel into
+decode + RGBA-convert + 3.7MB latest.rgba write; whenever that pipeline runs
+slower than the 30fps arrival rate the backlog (and therefore latency) grows
+without bound. The old browser bridge never showed this because its inFlight
+guard dropped frames when behind — it was accidentally latest-wins.
+
+Two fixes on `host-native-webrtc-receive` (both in place, `cargo check` clean):
+
+1. decode_loop is now latest-wins (webrtc_native.rs): it drains the channel,
+   DECODES every access unit (H264 P-frames need the reference chain, so frames
+   cannot simply be dropped pre-decode) but converts + writes ONLY the newest
+   decoded picture; older ones are counted as "skipped stale". Also switched
+   write_rgb8 + manual alpha pass to openh264's SIMD write_rgba8 (one pass).
+   A 10s stats line logs decoded/written/skipped/backlog. If backlog GROWS while
+   skips are happening, DECODE itself can't keep up — that would need drop-to-
+   next-IDR + a PLI request, not yet implemented.
+2. Workspace Cargo.toml: `[profile.dev.package."*"] opt-level = 2`. Under plain
+   `cargo run` (debug), openh264's C code and the YUV→RGBA conversion compiled
+   at -O0 and plausibly couldn't sustain 720p30 decode at all, which no amount
+   of write-skipping can fix. Dependencies now build optimized even in dev;
+   first rebuild after this change is slow (full dep recompile), workspace-crate
+   iteration stays fast.
+
+Retest: restart the host, stream from the phone, and check the
+`native webrtc: decode stats:` lines — healthy is backlog 0-1 and skipped
+staying near-flat; lag at the camera should be sub-second. If skipped climbs
+steadily but backlog stays ~0, the write path is just slower than 30fps (fine —
+output fps degrades gracefully, latency stays low).
+
+
+
+## 2026-07-05 midday: "frozen frame again" = PC changed subnets, phone never reached the host
+
+Diagnosis (no code change needed; native-receive host was healthy the whole time):
+latest.rgba was frozen at 01:20:58 local — the exact moment last night's phone
+connection reset (10054, frames STOPPED at seq 634). The virtual camera serves
+that last frame forever, hence the frozen image. After today's 12:56 host
+restart, host.log showed heartbeats but ZERO phone signaling — the documented
+"dropped before the host" signature. Cause: the PC's Wi-Fi is now on
+192.168.50.238 (192.168.50.x subnet, gateway 192.168.50.1), while the phone was
+last at 192.168.1.212 on the old 192.168.1.x network, which no longer pings.
+The app's saved host IP (192.168.1.227) is therefore dead.
+
+Fix checklist when this signature appears (host heartbeats + no phone signaling):
+check the PC's current IP (`Get-NetIPAddress -AddressFamily IPv4`), make sure
+the phone is on the SAME Wi-Fi network, and point the app at the CURRENT host
+IP — today that is http://192.168.50.238:41003/phone. A zombie /receiver tab
+from a previous session may still post heartbeats ("posted N frames" never
+increasing); it is inert under host-native arbitration and can be closed.
 
 ## Standing workflow preference
 

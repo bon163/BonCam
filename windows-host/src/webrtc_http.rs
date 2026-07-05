@@ -18,7 +18,7 @@ use tokio::{
 };
 use tracing::{info, warn};
 
-use crate::{preview::PreviewSink, virtual_camera::VirtualCameraManager};
+use crate::{preview::PreviewSink, virtual_camera::VirtualCameraManager, webrtc_native::NativeWebRtcReceiver};
 
 // The receiver page polls GET /signal/offer every 500ms for as long as its JS is
 // actually running, which makes that poll a liveness signal for the tab itself.
@@ -61,14 +61,26 @@ pub struct WebRtcHttpServer {
     state: Arc<Mutex<SignalState>>,
     preview: Arc<PreviewSink>,
     virtual_camera: Arc<VirtualCameraManager>,
+    // The host now answers offers itself (no browser). None only if the WebRTC
+    // stack failed to initialize, in which case we fall back to the legacy
+    // browser-receiver signaling so the /receiver page still works.
+    native: Option<Arc<NativeWebRtcReceiver>>,
 }
 
 impl WebRtcHttpServer {
     pub fn new(preview: Arc<PreviewSink>) -> Self {
+        let native = match NativeWebRtcReceiver::new(preview.clone()) {
+            Ok(receiver) => Some(Arc::new(receiver)),
+            Err(err) => {
+                warn!("native WebRTC receiver unavailable, falling back to browser receiver: {err:#}");
+                None
+            }
+        };
         Self {
             state: Arc::new(Mutex::new(SignalState::default())),
             virtual_camera: Arc::new(VirtualCameraManager::new(preview.clone())),
             preview,
+            native,
         }
     }
 
@@ -93,8 +105,9 @@ impl WebRtcHttpServer {
             let state = self.state.clone();
             let preview = self.preview.clone();
             let virtual_camera = self.virtual_camera.clone();
+            let native = self.native.clone();
             tokio::spawn(async move {
-                if let Err(err) = handle_connection(stream, state, preview, virtual_camera).await {
+                if let Err(err) = handle_connection(stream, state, preview, virtual_camera, native).await {
                     warn!("WebRTC HTTP request from {peer} failed: {err:#}");
                 }
             });
@@ -102,7 +115,7 @@ impl WebRtcHttpServer {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SignalState>>, preview: Arc<PreviewSink>, virtual_camera: Arc<VirtualCameraManager>) -> Result<()> {
+async fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SignalState>>, preview: Arc<PreviewSink>, virtual_camera: Arc<VirtualCameraManager>, native: Option<Arc<NativeWebRtcReceiver>>) -> Result<()> {
     // Connections are kept alive and reused for many requests. The raw frame
     // bridge posts ~30 requests/second; closing after every response produced
     // enough connection churn to destabilize the listener.
@@ -208,19 +221,40 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SignalState>>
         ("POST", "/signal/reset") => {
             info!("WebRTC signal: phone reset signaling (new session starting)");
             *state.lock().await = SignalState::default();
+            if let Some(native) = &native {
+                native.reset().await;
+            }
             respond_json(&mut stream, json!({ "ok": true })).await
         }
         ("POST", "/signal/offer") => {
             let value: Value = serde_json::from_slice(body)?;
-            let mut state = state.lock().await;
             info!("WebRTC signal: phone posted offer");
+            // The host answers the offer itself (native receiver), so no browser is
+            // required. We still record the offer so a browser /receiver can serve as
+            // a fallback if the native stack failed to initialize.
+            let native_answer = match &native {
+                Some(native) => match native.accept_offer(&value).await {
+                    Ok(answer) => Some(answer),
+                    Err(err) => {
+                        warn!("WebRTC signal: native receiver failed to answer offer (browser fallback active): {err:#}");
+                        None
+                    }
+                },
+                None => None,
+            };
+            let mut state = state.lock().await;
             state.offer = Some(value);
-            state.answer_winner = None;
             // Do NOT clear phone_candidates here: the phone's trickle candidates can
             // race ahead of the offer POST and would be wiped (observed live, breaks
             // ICE entirely). Phone clients always POST /signal/reset before creating
             // their peer connection, so reset is the safe clearing point.
             state.receiver_candidates.clear();
+            match native_answer {
+                // The host is the winning "receiver": publish its answer so the phone
+                // consumes it at GET /signal/answer exactly as before.
+                Some(answer) => state.answer_winner = Some((crate::webrtc_native::HOST_RECEIVER_ID.to_string(), answer)),
+                None => state.answer_winner = None,
+            }
             respond_json(&mut stream, json!({ "ok": true })).await
         }
         ("GET", "/signal/offer") => {
@@ -280,6 +314,11 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SignalState>>
         }
         ("POST", "/signal/candidate/phone") => {
             let value: Value = serde_json::from_slice(body)?;
+            // Feed the native peer connection directly; also buffer for a browser
+            // fallback receiver (which reads GET /signal/candidates/phone).
+            if let Some(native) = &native {
+                native.add_phone_candidate(&value).await;
+            }
             state.lock().await.phone_candidates.push_back(value);
             info!("WebRTC signal: phone posted ICE candidate");
             respond_json(&mut stream, json!({ "ok": true })).await
@@ -300,17 +339,26 @@ async fn handle_connection(mut stream: TcpStream, state: Arc<Mutex<SignalState>>
             respond_json(&mut stream, json!({ "ok": true })).await
         }
         ("GET", "/signal/candidates/receiver") => {
-            // Serve only the winning receiver's candidates, flattened to the plain
-            // shape old phone clients expect.
-            let candidates: Vec<Value> = {
-                let state = state.lock().await;
-                let winner_id = state.answer_winner.as_ref().map(|(id, _)| id.clone());
-                state
-                    .receiver_candidates
-                    .iter()
-                    .filter(|entry| entry.get("id").and_then(|id| id.as_str()) == winner_id.as_deref())
-                    .filter_map(|entry| entry.get("candidate").cloned())
-                    .collect()
+            // When the host is answering natively, serve its gathered local
+            // candidates. Otherwise (browser fallback) serve only the winning
+            // browser receiver's candidates, flattened to the plain shape the phone
+            // expects. Both already produce plain `{ candidate, sdpMid, ... }` objects.
+            let native_candidates = match &native {
+                Some(native) if native.is_active().await => Some(native.host_candidates().await),
+                _ => None,
+            };
+            let candidates: Vec<Value> = match native_candidates {
+                Some(candidates) => candidates,
+                None => {
+                    let state = state.lock().await;
+                    let winner_id = state.answer_winner.as_ref().map(|(id, _)| id.clone());
+                    state
+                        .receiver_candidates
+                        .iter()
+                        .filter(|entry| entry.get("id").and_then(|id| id.as_str()) == winner_id.as_deref())
+                        .filter_map(|entry| entry.get("candidate").cloned())
+                        .collect()
+                }
             };
             respond_json(&mut stream, json!({ "candidates": candidates })).await
         }
