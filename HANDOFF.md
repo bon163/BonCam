@@ -5,8 +5,12 @@ Last updated: 2026-07-05 (branch `single-start-script`: one-command start.ps1)
 ## 2026-07-05: `start.ps1` — one command to run everything
 
 New repo-root script `start.ps1` collapses the whole test setup into a single
-command the user runs from a normal PowerShell: `.\start.ps1`. Motivation: the
-user should never have to remember the separate install / register / host steps.
+command. It is launched via a `start.cmd` wrapper (`.\start.cmd`) — running the
+.ps1 directly is blocked by the machine's PowerShell execution policy
+(`running scripts is disabled on this system`), but a .cmd is not, and it calls
+`powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1 %*`. Motivation:
+the user should never have to remember the separate install / register / host
+steps or the `-ExecutionPolicy Bypass` incantation.
 
 What it does (see the header comment in the file):
 - Self-elevates with a single UAC prompt (admin is required to register the camera

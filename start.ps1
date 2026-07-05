@@ -3,7 +3,10 @@
 
     Run it from a normal PowerShell window:
 
-        .\start.ps1
+        .\start.cmd
+
+    (Use the start.cmd wrapper — running start.ps1 directly can be blocked by the
+    PowerShell execution policy; the .cmd is not.)
 
     It self-elevates (a single UAC prompt), then in the elevated window it:
       1. prints the address to type into the iPhone app,
