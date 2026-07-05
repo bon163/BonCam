@@ -36,6 +36,12 @@ static constexpr wchar_t SHARED_FRAME_PATH[] = L"C:\\ProgramData\\IPhoneCameraSt
 // tightly packed RGBA. Headerless files are the legacy fixed portrait layout.
 static constexpr UINT32 SHARED_HEADER_BYTES = 16;
 static constexpr BYTE SHARED_FRAME_MAGIC[4] = { 'I', 'P', 'C', 'F' };
+// If latest.rgba has not been rewritten for this long, the phone/host stream has
+// dropped and we are about to serve a frozen image forever. Past this age the
+// last good frame is shown darkened with a "signal lost" overlay instead, so the
+// stall is visible in-camera (Discord, Windows Camera, ...) and self-heals when
+// fresh frames resume. Matches the host's own 3s raw-frame stall threshold.
+static constexpr ULONGLONG STALE_FRAME_THRESHOLD_MS = 3000;
 static std::atomic<long> g_objectCount = 0;
 static std::atomic<long> g_lockCount = 0;
 static HMODULE g_module = nullptr;
@@ -293,10 +299,13 @@ public:
         const BYTE* sharedPixels = nullptr;
         UINT32 sharedWidth = 0;
         UINT32 sharedHeight = 0;
-        const BYTE* liveRgba = nullptr;
-        if (fileBuffer && LoadSharedRgba(fileBuffer, &sharedPixels, &sharedWidth, &sharedHeight)) {
+        ULONGLONG fileAgeMs = 0;
+        // liveRgba points into one of our own writable heap buffers (fileBuffer or
+        // fitBuffer), so the stale overlay below can composite over it in place.
+        BYTE* liveRgba = nullptr;
+        if (fileBuffer && LoadSharedRgba(fileBuffer, &sharedPixels, &sharedWidth, &sharedHeight, &fileAgeMs)) {
             if (sharedWidth == outWidth && sharedHeight == outHeight) {
-                liveRgba = sharedPixels;
+                liveRgba = const_cast<BYTE*>(sharedPixels);
             } else {
                 // Shared frame orientation differs from the negotiated output
                 // (e.g. the phone rotated mid-stream): aspect-fit with black bars.
@@ -306,6 +315,19 @@ public:
                     liveRgba = fitBuffer;
                 }
             }
+        }
+        // The stream has dropped if the last good frame has gone stale. Rather
+        // than serve that frozen image forever, dim it and draw a "signal lost"
+        // overlay so the stall is obvious in-camera; it clears itself the moment
+        // the host writes a fresh frame again.
+        const bool stale = liveRgba && fileAgeMs >= STALE_FRAME_THRESHOLD_MS;
+        if (stale) {
+            ApplyStaleOverlay(liveRgba, outWidth, outHeight, GetTickCount64());
+            if (!stale_) LogFormat(L"IPhoneCameraStream::FillFrame stream STALE age=%llums, showing signal-lost overlay", fileAgeMs);
+            stale_ = true;
+        } else if (liveRgba) {
+            if (stale_) LogLine(L"IPhoneCameraStream::FillFrame stream RECOVERED, live frames resumed");
+            stale_ = false;
         }
         if (!liveRgba && !loggedFallback_) {
             LogLine(L"IPhoneCameraStream::FillFrame using fallback pattern");
@@ -526,7 +548,8 @@ private:
 
     // fileBuffer must hold SHARED_HEADER_BYTES + MAX_RGBA_BYTES. On success *pixels
     // points into fileBuffer at tightly packed RGBA of *width x *height.
-    bool LoadSharedRgba(BYTE* fileBuffer, const BYTE** pixels, UINT32* width, UINT32* height) {
+    bool LoadSharedRgba(BYTE* fileBuffer, const BYTE** pixels, UINT32* width, UINT32* height, ULONGLONG* fileAgeMs) {
+        *fileAgeMs = 0;
         HANDLE file = CreateFileW(
             SHARED_FRAME_PATH,
             GENERIC_READ,
@@ -538,6 +561,19 @@ private:
         if (file == INVALID_HANDLE_VALUE) {
             if (!loggedFallback_) LogFormat(L"IPhoneCameraStream::FillFrame open shared frame failed gle=%lu", GetLastError());
             return false;
+        }
+        // How long since the host last rewrote the frame. GetFileTime and
+        // GetSystemTimeAsFileTime share the UTC system clock, so the delta is a
+        // valid elapsed time (guards against a future timestamp underflowing).
+        FILETIME lastWriteFt = {};
+        if (GetFileTime(file, nullptr, nullptr, &lastWriteFt)) {
+            FILETIME nowFt = {};
+            GetSystemTimeAsFileTime(&nowFt);
+            ULARGE_INTEGER lastWrite = { lastWriteFt.dwLowDateTime, lastWriteFt.dwHighDateTime };
+            ULARGE_INTEGER now = { nowFt.dwLowDateTime, nowFt.dwHighDateTime };
+            if (now.QuadPart > lastWrite.QuadPart) {
+                *fileAgeMs = (now.QuadPart - lastWrite.QuadPart) / 10000ULL;
+            }
         }
         DWORD read = 0;
         const BOOL ok = ReadFile(file, fileBuffer, SHARED_HEADER_BYTES + MAX_RGBA_BYTES, &read, nullptr);
@@ -608,6 +644,64 @@ private:
             for (UINT32 x = 0; x < fitWidth; ++x) {
                 const UINT32 srcX = static_cast<UINT32>(static_cast<UINT64>(x) * srcWidth / fitWidth);
                 memcpy(dstRow + (static_cast<size_t>(x) * 4), srcRow + (static_cast<size_t>(srcX) * 4), 4);
+            }
+        }
+    }
+
+    // Composite an unmistakable "signal lost" treatment onto a live RGBA frame
+    // (tightly packed, width x height) in place: darken the frozen image, draw a
+    // pulsing red border, and stamp a red no-signal glyph (ring + diagonal slash)
+    // in the centre. tickMs drives the pulse so the state reads as live-but-stalled
+    // rather than a frozen picture.
+    static void ApplyStaleOverlay(BYTE* rgba, UINT32 width, UINT32 height, ULONGLONG tickMs) {
+        const UINT32 stride = width * 4;
+        // Darken to ~30% so the last frame reads as inactive (alpha untouched).
+        for (UINT32 i = 0; i < stride * height; i += 4) {
+            rgba[i] = static_cast<BYTE>(rgba[i] * 3 / 10);
+            rgba[i + 1] = static_cast<BYTE>(rgba[i + 1] * 3 / 10);
+            rgba[i + 2] = static_cast<BYTE>(rgba[i + 2] * 3 / 10);
+        }
+        // Triangle-wave pulse in [64,255] over a ~1.6s period.
+        const UINT32 phase = static_cast<UINT32>(tickMs % 1600);
+        const UINT32 tri = phase < 800 ? phase : 1600 - phase;   // 0..800
+        const BYTE pulse = static_cast<BYTE>(64 + tri * 191 / 800);
+
+        // Pulsing red border framing the whole image.
+        const UINT32 border = (width < height ? width : height) / 40 + 2;
+        for (UINT32 y = 0; y < height; ++y) {
+            BYTE* row = rgba + static_cast<size_t>(y) * stride;
+            const bool edgeRow = y < border || y >= height - border;
+            for (UINT32 x = 0; x < width; ++x) {
+                if (edgeRow || x < border || x >= width - border) {
+                    BYTE* px = row + static_cast<size_t>(x) * 4;
+                    px[0] = pulse; px[1] = 0; px[2] = 0; px[3] = 0xFF;
+                }
+            }
+        }
+
+        // Centred no-signal glyph: a red ring with a diagonal slash through it.
+        const int cx = static_cast<int>(width / 2);
+        const int cy = static_cast<int>(height / 2);
+        const int radius = static_cast<int>((width < height ? width : height) / 6);
+        if (radius < 6) return;
+        const int ringInner = radius - radius / 6;   // ring thickness ~ radius/6
+        const int slashHalf = radius / 8 + 1;        // slash half-thickness
+        for (int y = cy - radius; y <= cy + radius; ++y) {
+            if (y < 0 || y >= static_cast<int>(height)) continue;
+            BYTE* row = rgba + static_cast<size_t>(y) * stride;
+            for (int x = cx - radius; x <= cx + radius; ++x) {
+                if (x < 0 || x >= static_cast<int>(width)) continue;
+                const int dx = x - cx;
+                const int dy = y - cy;
+                const int dist2 = dx * dx + dy * dy;
+                int diag = dx - dy;
+                if (diag < 0) diag = -diag;
+                const bool onRing = dist2 <= radius * radius && dist2 >= ringInner * ringInner;
+                const bool onSlash = dist2 <= ringInner * ringInner && diag <= slashHalf;
+                if (onRing || onSlash) {
+                    BYTE* px = row + static_cast<size_t>(x) * 4;
+                    px[0] = pulse; px[1] = 0; px[2] = 0; px[3] = 0xFF;
+                }
             }
         }
     }
@@ -762,6 +856,7 @@ private:
     bool loggedLiveFrame_ = false;
     bool loggedFallback_ = false;
     bool loggedAllocatorFallback_ = false;
+    bool stale_ = false;
 };
 
 class IPhoneExtendedCameraControl final : public IMFExtendedCameraControl {

@@ -1,6 +1,6 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (branch `host-webrtc-keyframe-request`: RTCP PLI keyframe recovery)
+Last updated: 2026-07-05 (merged to `main`: RTCP PLI keyframe recovery + in-camera signal-lost overlay)
 
 ## 2026-07-05: RTCP PLI keyframe request — recover from mid-stream decode stalls
 
@@ -34,6 +34,44 @@ run through a network blip or force one; watch host.log for `requested keyframe
 climbing again (instead of freezing until `peer connection state failed`). The
 in-camera symptom of the OLD behaviour was the stream freezing; with the stale-
 frame overlay branch it would instead go to the signal-lost overlay after 3s.
+## 2026-07-05: stale-frame "signal lost" overlay — stalls are now visible in-camera
+
+Branch: `host-stale-frame-fallback` (off `main` @ 65ccf08, after the native
+receiver landed). Motivation: the recurring "frozen frame again" reports were
+almost never host bugs — the phone drops (subnet change, stale saved IP, iOS
+Local Network permission), the host stops writing `latest.rgba`, and the virtual
+camera happily serves the last good frame FOREVER, so it looks frozen. This makes
+the stall self-evident in every consuming app.
+
+DLL-only change (`windows-virtual-camera/source/iphone_camera_source.cpp`); NO
+host or protocol change, so the host/frame contract cannot regress:
+
+- `LoadSharedRgba` now also returns the shared file's age, computed from
+  `GetFileTime`(last write) vs `GetSystemTimeAsFileTime` (same UTC system clock,
+  so the delta is valid; a future timestamp clamps to age 0).
+- If the last good frame is older than `STALE_FRAME_THRESHOLD_MS` (3000 ms, matches
+  the host's own 3s raw-frame stall threshold), `RequestSample` composites
+  `ApplyStaleOverlay` onto the frame in place: darken to ~30%, a pulsing red
+  border, and a centred red no-signal glyph (ring + diagonal slash). `GetTickCount64`
+  drives the pulse so it reads as live-but-stalled, not a frozen picture. The
+  overlay writes into our own heap buffer (fileBuffer/fitBuffer) BEFORE NV12/RGB32
+  conversion, so both output formats and both orientations get it for free.
+- Self-heals: the moment the host writes a fresh frame, age drops below the
+  threshold and live video returns. Transitions log once each way
+  (`stream STALE age=...ms` / `stream RECOVERED`).
+
+Status: COMPILES (`build.ps1` clean). VERIFIED HEADLESSLY: with the existing stale
+`latest.rgba` (~4.8h old), `probe_source_reader.exe 0 <dump>` logged
+`stream STALE age=17440784ms, showing signal-lost overlay` and the dumped NV12
+frame checks out at the pixel level — the top/bottom/left/right border pixels and
+both the glyph ring and the diagonal slash all read chroma U≈109 V≈183 (pure red),
+while interior content reads U≈126 V≈129 (near-gray, darkened original). NOTE: the
+probe loads the DLL registered under HKCU (source\bin), so its log is
+source\bin\iphone_camera_source.log, NOT the ProgramData one (svchost's).
+NOT yet verified end-to-end through the frame server in a real app (needs an admin
+`Restart-Service FrameServer` so svchost picks up the new DLL, then let a live
+stream drop and watch the camera show the overlay, then reconnect and watch it
+clear).
 
 ## 2026-07-05: native in-process WebRTC receive — kills the browser receiver
 
@@ -155,14 +193,22 @@ increasing); it is inert under host-native arbitration and can be closed.
 
 ## Standing workflow preference
 
-When moving completed branch work into `main`, use a pull request workflow by
-default: push the feature branch, create a PR into `main`, verify/merge the PR,
-then update local `main` from the merged result. Only merge directly into
-`main` when the user explicitly asks to bypass PRs.
+When moving completed branch work into `main`, ALWAYS use a pull request
+workflow: push the feature branch, create a PR into `main`, verify/merge the PR,
+then update local `main` from the merged result. Treat user shorthand like
+"merge", "commit to main", "land it", "full commit", or similar as a request to
+complete that PR workflow, NOT as permission to push directly to `main`. Only
+merge/push directly to `main` if the user explicitly says to bypass PRs, skip the
+PR, or direct-push.
 
 2026-07-05: `IOS-Redesign` was merged directly into `main` and pushed as
 commit `4bb43d6` (`Merge IOS redesign`). Future similar requests should use the
 PR workflow above unless told otherwise.
+
+2026-07-05: `host-native-webrtc-receive` was also fast-forwarded directly into
+`main` and pushed as commit `65ccf08` (`Receive WebRTC video natively in host`)
+after the user said "run a full commit to main etc". This should NOT be repeated:
+that phrasing should still trigger the PR workflow above.
 
 ## 2026-07-04 afternoon: host-death investigation + black-box logging added
 
