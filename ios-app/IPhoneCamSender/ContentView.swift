@@ -315,9 +315,17 @@ struct SettingsView: View {
                     GlassPanel {
                         Toggle(isOn: $appModel.highFrameRate) {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("60 fps")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.white)
+                                HStack(spacing: 8) {
+                                    Text("60 fps")
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.white)
+                                    Text("BETA")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.black)
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 3)
+                                        .background(.mint, in: Capsule())
+                                }
                                 Text("Smoother motion. Uses more CPU and, at a fixed bitrate, softens each frame. Default is 30 fps. Takes effect the next time you start streaming.")
                                     .font(.footnote)
                                     .foregroundStyle(.white.opacity(0.58))
