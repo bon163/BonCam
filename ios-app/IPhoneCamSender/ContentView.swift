@@ -42,8 +42,9 @@ struct ContentView: View {
                     hostAddress: appModel.hostAddress,
                     initialFacing: appModel.cameraPosition == .back ? "environment" : "user",
                     initialQuality: appModel.selectedPreset == .hd720p30 ? 720 : 1080,
+                    initialFps: appModel.targetFps,
                     onStatus: { appModel.webRTCStatusChanged($0) },
-                    onConfig: { facing, quality in appModel.applyWebRTCConfig(facing: facing, quality: quality) }
+                    onConfig: { facing, quality, fps in appModel.applyWebRTCConfig(facing: facing, quality: quality, fps: fps) }
                 )
                 .ignoresSafeArea()
                 .onDisappear { appModel.webRTCStatusChanged("Idle") }
@@ -307,6 +308,25 @@ struct SettingsView: View {
                         }
                     }
 
+                    Text("Streaming")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.white)
+
+                    GlassPanel {
+                        Toggle(isOn: $appModel.highFrameRate) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("60 fps")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                Text("Smoother motion. Uses more CPU and, at a fixed bitrate, softens each frame. Default is 30 fps. Takes effect the next time you start streaming.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.white.opacity(0.58))
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .tint(.mint)
+                    }
+
                     Text("Current setup")
                         .font(.title3.weight(.bold))
                         .foregroundStyle(.white)
@@ -314,6 +334,7 @@ struct SettingsView: View {
                     VStack(spacing: 12) {
                         SettingsInfoRow(title: "Camera", value: appModel.cameraPosition == .back ? "Back" : "Front", systemImage: "camera.fill")
                         SettingsInfoRow(title: "Quality", value: appModel.selectedPreset.displayName, systemImage: "rectangle.inset.filled")
+                        SettingsInfoRow(title: "Frame rate", value: appModel.highFrameRate ? "60 fps" : "30 fps", systemImage: "speedometer")
                         SettingsInfoRow(title: "Status", value: appModel.connectionState, systemImage: "waveform.path.ecg")
                     }
                 }
@@ -605,19 +626,22 @@ struct WebRTCSenderView: UIViewRepresentable {
     let hostAddress: String
     let initialFacing: String
     let initialQuality: Int
+    let initialFps: Int
     let onStatus: (String) -> Void
-    let onConfig: (String, Int) -> Void
+    let onConfig: (String, Int, Int) -> Void
 
     init(
         hostAddress: String,
         initialFacing: String,
         initialQuality: Int,
+        initialFps: Int,
         onStatus: @escaping (String) -> Void,
-        onConfig: @escaping (String, Int) -> Void
+        onConfig: @escaping (String, Int, Int) -> Void
     ) {
         self.hostAddress = hostAddress
         self.initialFacing = initialFacing
         self.initialQuality = initialQuality
+        self.initialFps = initialFps
         self.onStatus = onStatus
         self.onConfig = onConfig
     }
@@ -634,7 +658,8 @@ struct WebRTCSenderView: UIViewRepresentable {
 
         let facingLiteral = initialFacing == "user" ? "user" : "environment"
         let quality = initialQuality == 1080 ? 1080 : 720
-        let seedScript = "window.__initialFacing = '\(facingLiteral)'; window.__initialQuality = \(quality);"
+        let fps = initialFps == 60 ? 60 : 30
+        let seedScript = "window.__initialFacing = '\(facingLiteral)'; window.__initialQuality = \(quality); window.__initialFps = \(fps);"
         contentController.addUserScript(WKUserScript(source: seedScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
 
         let configuration = WKWebViewConfiguration()
@@ -667,10 +692,10 @@ struct WebRTCSenderView: UIViewRepresentable {
     final class Coordinator: NSObject, WKUIDelegate, WKNavigationDelegate, WKScriptMessageHandler {
         var hostAddress: String
         let onStatus: (String) -> Void
-        let onConfig: (String, Int) -> Void
+        let onConfig: (String, Int, Int) -> Void
         weak var webView: WKWebView?
 
-        init(hostAddress: String, onStatus: @escaping (String) -> Void, onConfig: @escaping (String, Int) -> Void) {
+        init(hostAddress: String, onStatus: @escaping (String) -> Void, onConfig: @escaping (String, Int, Int) -> Void) {
             self.hostAddress = hostAddress
             self.onStatus = onStatus
             self.onConfig = onConfig
@@ -688,7 +713,9 @@ struct WebRTCSenderView: UIViewRepresentable {
                 if let payload = message.body as? [String: Any],
                    let facing = payload["facing"] as? String,
                    let quality = payload["quality"] as? Int {
-                    Task { @MainActor in self.onConfig(facing, quality) }
+                    // fps was added later; default to 30 if an older page omits it.
+                    let fps = payload["fps"] as? Int ?? 30
+                    Task { @MainActor in self.onConfig(facing, quality, fps) }
                 }
                 return
             }
@@ -834,6 +861,7 @@ struct WebRTCSenderView: UIViewRepresentable {
     let restartTimer = null;
     let currentFacing = window.__initialFacing === 'user' ? 'user' : 'environment';
     let currentQuality = window.__initialQuality === 1080 ? 1080 : 720;
+    let currentFps = window.__initialFps === 60 ? 60 : 30;
 
     function setStatus(message) {
       statusEl.textContent = message;
@@ -842,7 +870,7 @@ struct WebRTCSenderView: UIViewRepresentable {
 
     function reportConfig() {
       try {
-        window.webkit.messageHandlers.config.postMessage({ facing: currentFacing, quality: currentQuality });
+        window.webkit.messageHandlers.config.postMessage({ facing: currentFacing, quality: currentQuality, fps: currentFps });
       } catch (e) {}
     }
 
@@ -857,7 +885,7 @@ struct WebRTCSenderView: UIViewRepresentable {
         facingMode: { ideal: currentFacing },
         width: { ideal: dims.w },
         height: { ideal: dims.h },
-        frameRate: { ideal: 30, max: 30 }
+        frameRate: { ideal: currentFps, max: currentFps }
       };
     }
 
@@ -873,7 +901,7 @@ struct WebRTCSenderView: UIViewRepresentable {
         const params = sender.getParameters();
         if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
         params.encodings[0].maxBitrate = currentQuality === 1080 ? 10000000 : 5000000;
-        params.encodings[0].maxFramerate = 30;
+        params.encodings[0].maxFramerate = currentFps;
         // Honored where supported (harmless where not); keeps sharpness on drops.
         params.degradationPreference = 'maintain-resolution';
         await sender.setParameters(params);
