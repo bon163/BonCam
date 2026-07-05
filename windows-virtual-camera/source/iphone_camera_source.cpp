@@ -10,6 +10,7 @@
 #include <propvarutil.h>
 #include <atomic>
 #include <new>
+#include <vector>
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -294,7 +295,15 @@ public:
         const UINT32 outHeight = outputHeight_;
         const DWORD frameBytes = rgb32 ? outWidth * outHeight * 4 : outWidth * outHeight * 3 / 2;
 
-        BYTE* fileBuffer = new (std::nothrow) BYTE[SHARED_HEADER_BYTES + MAX_RGBA_BYTES];
+        // Reuse persistent scratch buffers across RequestSample calls instead of
+        // new/delete-ing ~3.7MB on every frame (~110MB/s of alloc/free churn at
+        // 30fps in whatever process hosts the camera). MF serializes sample
+        // requests per stream, so one buffer per stream is safe. Sized once, then
+        // reused; the .resize is a no-op after the first frame.
+        if (fileScratch_.size() < SHARED_HEADER_BYTES + MAX_RGBA_BYTES) {
+            fileScratch_.resize(SHARED_HEADER_BYTES + MAX_RGBA_BYTES);
+        }
+        BYTE* fileBuffer = fileScratch_.data();
         BYTE* fitBuffer = nullptr;
         const BYTE* sharedPixels = nullptr;
         UINT32 sharedWidth = 0;
@@ -309,11 +318,11 @@ public:
             } else {
                 // Shared frame orientation differs from the negotiated output
                 // (e.g. the phone rotated mid-stream): aspect-fit with black bars.
-                fitBuffer = new (std::nothrow) BYTE[outWidth * outHeight * 4];
-                if (fitBuffer) {
-                    FitRgba(sharedPixels, sharedWidth, sharedHeight, fitBuffer, outWidth, outHeight);
-                    liveRgba = fitBuffer;
-                }
+                const size_t fitBytes = static_cast<size_t>(outWidth) * outHeight * 4;
+                if (fitScratch_.size() < fitBytes) fitScratch_.resize(fitBytes);
+                fitBuffer = fitScratch_.data();
+                FitRgba(sharedPixels, sharedWidth, sharedHeight, fitBuffer, outWidth, outHeight);
+                liveRgba = fitBuffer;
             }
         }
         // The stream has dropped if the last good frame has gone stale. Rather
@@ -369,8 +378,6 @@ public:
             if (SUCCEEDED(hr)) hr = sample->AddBuffer(buffer);
             if (buffer) buffer->Release();
         }
-        delete[] fitBuffer;
-        delete[] fileBuffer;
         if (SUCCEEDED(hr)) hr = sample->SetSampleTime(MFGetSystemTime());
         if (SUCCEEDED(hr)) hr = sample->SetSampleDuration(FRAME_DURATION);
         if (SUCCEEDED(hr) && token) hr = sample->SetUnknown(MFSampleExtension_Token, token);
@@ -857,6 +864,10 @@ private:
     bool loggedFallback_ = false;
     bool loggedAllocatorFallback_ = false;
     bool stale_ = false;
+    // Persistent per-frame scratch buffers, reused across RequestSample calls to
+    // avoid ~110MB/s of alloc/free churn at 30fps. See RequestSample.
+    std::vector<BYTE> fileScratch_;
+    std::vector<BYTE> fitScratch_;
 };
 
 class IPhoneExtendedCameraControl final : public IMFExtendedCameraControl {

@@ -1,6 +1,121 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (merged to `main`: RTCP PLI keyframe recovery + in-camera signal-lost overlay)
+Last updated: 2026-07-05 (quality + stability pass: pinned sender bitrate, 1080p
+default, release-by-default host, DLL per-frame buffer reuse)
+
+## 2026-07-05 late: quality + stability pass ("lagging + quality dropped")
+
+Root cause of the quality drop: the sender (WebView JS in ContentView.swift) called
+`addTrack` but NEVER set encoding parameters, so WebRTC's default congestion control
+ran with degradationPreference `balanced` — which drops RESOLUTION at the first hint
+of packet loss (always present on Wi-Fi) and ramps back slowly. On a LAN with
+bandwidth to spare that meant needlessly downscaled video. Lag: the host was run as a
+DEBUG build under plain `cargo run`, and the DLL `new`/`delete`d a ~3.7MB buffer every
+RequestSample (~110MB/s alloc churn at 30fps).
+
+Changes (all compile: DLL `build.ps1` clean, host `cargo check` clean):
+
+- **Sender bitrate pinned + no resolution downscaling** (the big quality win).
+  `ios-app/.../ContentView.swift` senderHTML: new `applyEncodingParameters(sender)`
+  sets `encodings[0].maxBitrate` (10Mbps@1080p / 5Mbps@720p), `maxFramerate=30`, and
+  `degradationPreference='maintain-resolution'`. Called after `addTrack` in start()
+  and after `replaceTrack` in applyCameraChange() (the 1080<->720 toggle changes the
+  target). The host web `/phone` page (`webrtc_http.rs`) got the same for parity
+  (Edge fake-cam testing). REQUIRES AN XCODE REBUILD ON THE MAC to reach the phone.
+- **1080p is now the default** (`AppModel.swift` selectedPreset = .hd1080p30). Same
+  Mac rebuild caveat.
+- **Host runs RELEASE by default** (`start.ps1`): `-Release` switch removed, added
+  `-Debug` opt-out. Debug openh264 decode + YUV->RGBA + latest.rgba write couldn't
+  always sustain 720p30. `.\start.cmd` now builds/runs optimised automatically.
+- **DLL reuses per-frame scratch buffers** (`iphone_camera_source.cpp`): `fileScratch_`
+  / `fitScratch_` `std::vector<BYTE>` members replace the per-RequestSample new/delete
+  (MF serializes sample requests per stream, so a single buffer per stream is safe).
+  Removes the ~110MB/s alloc churn in whatever process hosts the camera. `<vector>`
+  added to includes.
+
+DEPLOY to make these live:
+- Host: just `.\start.cmd` (release now). No extra step.
+- DLL: rebuilt into `source\bin`. To reach REAL apps it needs
+  `install-machine.ps1` + an admin `Restart-Service FrameServer` (svchost keeps the
+  old module loaded) — `.\start.cmd -Rebuild` does the install; the service restart is
+  the usual admin step. In-process probes pick up the new DLL with no restart.
+- iOS app: Xcode rebuild on the Mac (sender JS + default preset live in the app bundle).
+
+NOT yet verified live. To verify quality: stream from the (rebuilt) app, confirm the
+picture stays at full res through a Wi-Fi blip instead of going soft. To verify lag:
+run the host via start.cmd (release) and watch `host.log` `decode stats:` — backlog
+should stay 0-1.
+
+## 2026-07-05: `start.ps1` — one command to run everything
+
+New repo-root script `start.ps1` collapses the whole test setup into a single
+command. It is launched via a `start.cmd` wrapper (`.\start.cmd`) — running the
+.ps1 directly is blocked by the machine's PowerShell execution policy
+(`running scripts is disabled on this system`), but a .cmd is not, and it calls
+`powershell -NoProfile -ExecutionPolicy Bypass -File start.ps1 %*`. Motivation:
+the user should never have to remember the separate install / register / host
+steps or the `-ExecutionPolicy Bypass` incantation.
+
+What it does (see the header comment in the file):
+- Self-elevates with a single UAC prompt (admin is required to register the camera
+  for ALL users, which is what new Teams needs — see the Teams note in the backlog).
+  Re-launches itself with `-NoExit` so the elevated window stays up.
+- Prints the bare LAN IP to type into the iPhone app (DHCP IPv4, skips 169.254
+  link-local, prefers Wi-Fi). Verified it resolves 192.168.1.227 on this machine.
+- Ensures the machine-wide DLL is installed (`source\install-machine.ps1`); skips
+  the build if `ProgramData\...\iphone_camera_source.dll` already exists unless
+  `-Rebuild` is passed.
+- Registers the camera all-users/system by launching `register_virtual_camera.exe
+  start all-users system` HIDDEN with `-PassThru`, keeping the process handle.
+- Runs the host (`cargo run -p windows-host`, `+ --release` with `-Release`) in the
+  FOREGROUND so its log is what you watch.
+- On Ctrl+C / exit, a `finally` block kills the registrar process and runs
+  `register_virtual_camera.exe remove all-users system` to unregister the camera.
+
+Switches: `-Rebuild` (force DLL rebuild+reinstall), `-Release` (optimised host).
+
+Status: syntax-checked (PowerShell parser clean) and the non-elevated parts (IP
+detection, admin check, all referenced exe/script paths, cargo on PATH) verified.
+NOT yet run end-to-end through the UAC/elevation + registrar + host path — that
+needs an interactive run. Known caveats to watch on first real run: (a) the host
+now runs ELEVATED (cargo build/run as admin) — fine functionally, but if it ever
+fights the target dir with a non-elevated `cargo check` from a dev session, that's
+why; (b) `finally` teardown on Ctrl+C is reliable in most cases but not 100% — if
+it's skipped, the camera stays registered and the next run (or `registrar\
+run-remove.ps1`) cleans it up.
+
+## Backlog / things to look at next
+
+- **Per-frame CPU/allocation overhead in the DLL (efficiency).** Measured live
+  while streaming to Discord: our `windows-host` is cheap (~2.5% CPU, 54 MB) — the
+  high CPU + ~0.5 GB the user sees is DISCORD's own process (pid was at 52.8% CPU /
+  505 MB), i.e. Discord re-encoding the outgoing video, which any webcam would
+  incur. BUT our DLL does add real churn to whichever process hosts it: every
+  `RequestSample` (30fps) it `new`/`delete`s a ~3.7 MB buffer
+  (`iphone_camera_source.cpp` ~line 291, `fileBuffer`) and re-reads + RGBA→NV12
+  converts the whole frame. Fix to do: reuse a persistent per-stream buffer instead
+  of allocating each frame (~110 MB/s of alloc/free removed); consider caching the
+  file read / SIMD-ing the NV12 conversion. Won't change the headline (Discord's
+  encoder dominates) but removes the one genuine inefficiency in our code. Also:
+  the host under `cargo run` is a DEBUG build — use `run-windows-host.ps1 -Release`
+  for streaming.
+
+- **New Teams doesn't see the camera (Zoom does). RESOLVED 2026-07-05.** Root cause
+  (confirmed by registry): the MF source CLSID {7F812B6A-...} is registered in BOTH
+  HKLM (→ ProgramData DLL) and HKCU (→ dev source\bin DLL), so the frame server loads
+  it and Zoom (Win32) enumerates the CurrentUser/Session virtual camera fine. New
+  Teams is a PACKAGED (MSIX/AppContainer) app and only enumerates cameras registered
+  with `MFVirtualCameraAccess_AllUsers` (+ `System` lifetime). FIX CONFIRMED WORKING:
+  register with `registrar\run-start-all-users-system.ps1` from an admin prompt
+  (after `source\install-machine.ps1` so the HKLM/ProgramData DLL is current), keep
+  that window open, and fully restart Teams (it caches the device list at launch).
+  Teams then enumerates "iPhone Camera". So signing the DLL was NOT required — the
+  scope was the whole issue. NOTE: the registrar's `start` still waits for Enter and
+  Stops the camera on exit, so the camera only persists while that admin process is
+  alive; for a hands-off setup we'd want a persistent System registration that
+  doesn't tear down on exit. The dev HKCU registration shadowing the machine one for
+  the current user is also worth cleaning up (run-remove then a single machine-wide
+  install).
 
 ## 2026-07-05: RTCP PLI keyframe request — recover from mid-stream decode stalls
 
