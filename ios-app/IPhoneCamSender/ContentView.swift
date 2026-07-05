@@ -861,6 +861,27 @@ struct WebRTCSenderView: UIViewRepresentable {
       };
     }
 
+    // Pin the outgoing encoding so WebRTC does not silently downscale on this LAN.
+    // Without this the default congestion controller uses degradationPreference
+    // 'balanced', which drops RESOLUTION at the first hint of packet loss (always
+    // present on Wi-Fi) and is slow to ramp back — the "quality dropped" symptom.
+    // We are on a local link with bandwidth to spare, so cap the bitrate high and
+    // tell the encoder to keep resolution and shed framerate instead if it must.
+    async function applyEncodingParameters(sender) {
+      if (!sender) return;
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+        params.encodings[0].maxBitrate = currentQuality === 1080 ? 10000000 : 5000000;
+        params.encodings[0].maxFramerate = 30;
+        // Honored where supported (harmless where not); keeps sharpness on drops.
+        params.degradationPreference = 'maintain-resolution';
+        await sender.setParameters(params);
+      } catch (error) {
+        console.error('setParameters failed', error);
+      }
+    }
+
     // Live camera/quality change: re-capture and hot-swap the outgoing track without
     // renegotiating. If we are not streaming yet, the new settings apply on the next start().
     async function applyCameraChange() {
@@ -873,7 +894,11 @@ struct WebRTCSenderView: UIViewRepresentable {
         const newStream = await navigator.mediaDevices.getUserMedia({ audio: false, video: videoConstraints() });
         const newTrack = newStream.getVideoTracks()[0];
         const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video');
-        if (sender) await sender.replaceTrack(newTrack);
+        if (sender) {
+          await sender.replaceTrack(newTrack);
+          // Re-apply: the 1080<->720 toggle changes the target bitrate.
+          await applyEncodingParameters(sender);
+        }
         for (const track of stream.getTracks()) track.stop();
         stream = newStream;
         local.srcObject = stream;
@@ -967,6 +992,7 @@ struct WebRTCSenderView: UIViewRepresentable {
         track.addEventListener('ended', () => scheduleRestart('camera stopped'));
         activePc.addTrack(track, stream);
       }
+      await applyEncodingParameters(activePc.getSenders().find(s => s.track && s.track.kind === 'video'));
 
       const offer = await activePc.createOffer({ offerToReceiveVideo: false });
       await activePc.setLocalDescription(offer);

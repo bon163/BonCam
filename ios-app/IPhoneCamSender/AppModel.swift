@@ -11,7 +11,9 @@ final class AppModel: ObservableObject {
     }
     @Published var pairCode = ""
     @Published var connectionState = "Idle"
-    @Published var selectedPreset: StreamPreset = .hd720p30
+    // Default to 1080p: this is a LAN link with bandwidth to spare, and the
+    // sender now pins a high maxBitrate so the higher resolution actually holds.
+    @Published var selectedPreset: StreamPreset = .hd1080p30
     @Published var cameraPosition: CameraPosition = .back
     @Published var isStreaming = false
 

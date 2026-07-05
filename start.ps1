@@ -18,11 +18,15 @@
 
     Switches:
       -Rebuild   force a rebuild + reinstall of the virtual-camera DLL first
-      -Release   run the host optimised (release build)
+      -Debug     run the host as an unoptimised debug build (default is release)
+
+    The host now runs OPTIMISED (release) by default: the debug build's openh264
+    decode + YUV->RGBA + latest.rgba write could not always sustain 720p30, which
+    showed up as lag. Pass -Debug only for a fast-iterating dev loop.
 #>
 param(
     [switch]$Rebuild,
-    [switch]$Release
+    [switch]$Debug
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,7 +44,7 @@ if (-not (Test-Admin)) {
     Write-Host 'Requesting administrator rights (so every app, including Teams, can see the camera)...' -ForegroundColor Cyan
     $argList = @('-ExecutionPolicy', 'Bypass', '-NoExit', '-File', "`"$PSCommandPath`"")
     if ($Rebuild) { $argList += '-Rebuild' }
-    if ($Release) { $argList += '-Release' }
+    if ($Debug) { $argList += '-Debug' }
     try {
         Start-Process powershell -Verb RunAs -ArgumentList $argList
     } catch {
@@ -103,7 +107,7 @@ try {
     Write-Host 'Press Ctrl+C here to stop everything.' -ForegroundColor Green
     Write-Host ''
     $hostArgs = @('run', '-p', 'windows-host')
-    if ($Release) { $hostArgs += '--release' }
+    if (-not $Debug) { $hostArgs += '--release' }
     & cargo @hostArgs
 } finally {
     Write-Host ''

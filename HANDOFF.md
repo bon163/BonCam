@@ -1,6 +1,50 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (branch `single-start-script`: one-command start.ps1)
+Last updated: 2026-07-05 (quality + stability pass: pinned sender bitrate, 1080p
+default, release-by-default host, DLL per-frame buffer reuse)
+
+## 2026-07-05 late: quality + stability pass ("lagging + quality dropped")
+
+Root cause of the quality drop: the sender (WebView JS in ContentView.swift) called
+`addTrack` but NEVER set encoding parameters, so WebRTC's default congestion control
+ran with degradationPreference `balanced` — which drops RESOLUTION at the first hint
+of packet loss (always present on Wi-Fi) and ramps back slowly. On a LAN with
+bandwidth to spare that meant needlessly downscaled video. Lag: the host was run as a
+DEBUG build under plain `cargo run`, and the DLL `new`/`delete`d a ~3.7MB buffer every
+RequestSample (~110MB/s alloc churn at 30fps).
+
+Changes (all compile: DLL `build.ps1` clean, host `cargo check` clean):
+
+- **Sender bitrate pinned + no resolution downscaling** (the big quality win).
+  `ios-app/.../ContentView.swift` senderHTML: new `applyEncodingParameters(sender)`
+  sets `encodings[0].maxBitrate` (10Mbps@1080p / 5Mbps@720p), `maxFramerate=30`, and
+  `degradationPreference='maintain-resolution'`. Called after `addTrack` in start()
+  and after `replaceTrack` in applyCameraChange() (the 1080<->720 toggle changes the
+  target). The host web `/phone` page (`webrtc_http.rs`) got the same for parity
+  (Edge fake-cam testing). REQUIRES AN XCODE REBUILD ON THE MAC to reach the phone.
+- **1080p is now the default** (`AppModel.swift` selectedPreset = .hd1080p30). Same
+  Mac rebuild caveat.
+- **Host runs RELEASE by default** (`start.ps1`): `-Release` switch removed, added
+  `-Debug` opt-out. Debug openh264 decode + YUV->RGBA + latest.rgba write couldn't
+  always sustain 720p30. `.\start.cmd` now builds/runs optimised automatically.
+- **DLL reuses per-frame scratch buffers** (`iphone_camera_source.cpp`): `fileScratch_`
+  / `fitScratch_` `std::vector<BYTE>` members replace the per-RequestSample new/delete
+  (MF serializes sample requests per stream, so a single buffer per stream is safe).
+  Removes the ~110MB/s alloc churn in whatever process hosts the camera. `<vector>`
+  added to includes.
+
+DEPLOY to make these live:
+- Host: just `.\start.cmd` (release now). No extra step.
+- DLL: rebuilt into `source\bin`. To reach REAL apps it needs
+  `install-machine.ps1` + an admin `Restart-Service FrameServer` (svchost keeps the
+  old module loaded) — `.\start.cmd -Rebuild` does the install; the service restart is
+  the usual admin step. In-process probes pick up the new DLL with no restart.
+- iOS app: Xcode rebuild on the Mac (sender JS + default preset live in the app bundle).
+
+NOT yet verified live. To verify quality: stream from the (rebuilt) app, confirm the
+picture stays at full res through a Wi-Fi blip instead of going soft. To verify lag:
+run the host via start.cmd (release) and watch `host.log` `decode stats:` — backlog
+should stay 0-1.
 
 ## 2026-07-05: `start.ps1` — one command to run everything
 

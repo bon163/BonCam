@@ -935,6 +935,19 @@ fn phone_page() -> String {
               track.addEventListener('ended', () => scheduleRestart('camera stopped'));
               activePc.addTrack(track, stream);
             }
+            // Pin the encoding so WebRTC does not downscale resolution on packet
+            // loss (default 'balanced' degradation). LAN link => cap bitrate high.
+            try {
+              const videoSender = activePc.getSenders().find(s => s.track && s.track.kind === 'video');
+              if (videoSender) {
+                const params = videoSender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+                params.encodings[0].maxBitrate = 5000000;
+                params.encodings[0].maxFramerate = 30;
+                params.degradationPreference = 'maintain-resolution';
+                await videoSender.setParameters(params);
+              }
+            } catch (error) { console.error('setParameters failed', error); }
 
             const offer = await activePc.createOffer({ offerToReceiveVideo: false });
             await activePc.setLocalDescription(offer);
