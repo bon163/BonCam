@@ -16,8 +16,13 @@
 
     Press Ctrl+C to stop the host AND unregister the camera.
 
+    The script auto-detects a stale installed DLL: it compares the built
+    source\bin DLL to the one in ProgramData by hash and reinstalls only when they
+    differ, so a rebuilt DLL is picked up on the next launch with no extra flags.
+
     Switches:
-      -Rebuild   force a rebuild + reinstall of the virtual-camera DLL first
+      -Rebuild   force a fresh compile of the virtual-camera DLL before the
+                 up-to-date check (the reinstall-on-change happens either way)
       -Debug     run the host as an unoptimised debug build (default is release)
 
     The host now runs OPTIMISED (release) by default: the debug build's openh264
@@ -74,14 +79,40 @@ Write-Host "  (bare IP only - no http://, no port, no /phone)" -ForegroundColor 
 Write-Host '=======================================================' -ForegroundColor Green
 Write-Host ''
 
-# --- 2. Ensure the virtual-camera DLL is installed machine-wide ---
-$installedDll = Join-Path $env:ProgramData 'IPhoneCameraStreaming\iphone_camera_source.dll'
-if ($Rebuild -or -not (Test-Path $installedDll)) {
-    Write-Host 'Building + installing the virtual-camera DLL (machine-wide)...' -ForegroundColor Cyan
-    if ($Rebuild) { & (Join-Path $root 'windows-virtual-camera\source\build.ps1') }
-    & (Join-Path $root 'windows-virtual-camera\source\install-machine.ps1')
+# --- 2. Ensure the machine-wide DLL is present AND matches the built one ---
+# We compare the freshly-built source\bin DLL against the one installed in
+# ProgramData by hash, and only (re)install when they differ. That way a rebuilt
+# DLL is picked up automatically on the next launch — no need to remember -Rebuild
+# — while an unchanged DLL skips the install (and its FrameServer restart) entirely.
+$buildScript   = Join-Path $root 'windows-virtual-camera\source\build.ps1'
+$installScript = Join-Path $root 'windows-virtual-camera\source\install-machine.ps1'
+$sourceDll     = Join-Path $root 'windows-virtual-camera\source\bin\iphone_camera_source.dll'
+$installedDll  = Join-Path $env:ProgramData 'IPhoneCameraStreaming\iphone_camera_source.dll'
+
+if ($Rebuild) {
+    Write-Host 'Rebuilding the virtual-camera DLL (-Rebuild)...' -ForegroundColor Cyan
+    & $buildScript
+}
+# Need a built DLL to compare against; build one if this is a fresh checkout.
+if (-not (Test-Path $sourceDll)) {
+    Write-Host 'No built DLL found; building it...' -ForegroundColor Cyan
+    & $buildScript
+}
+
+function Get-DllHash($path) {
+    if (Test-Path $path) { (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash } else { $null }
+}
+$sourceHash    = Get-DllHash $sourceDll
+$installedHash = Get-DllHash $installedDll
+
+if (-not $installedHash) {
+    Write-Host 'Virtual-camera DLL not installed yet; installing machine-wide...' -ForegroundColor Cyan
+    & $installScript
+} elseif ($sourceHash -and $sourceHash -ne $installedHash) {
+    Write-Host 'Installed DLL is out of date; updating machine-wide (restarts the frame server)...' -ForegroundColor Cyan
+    & $installScript
 } else {
-    Write-Host 'Virtual-camera DLL already installed (pass -Rebuild to force a fresh build).' -ForegroundColor DarkGray
+    Write-Host 'Virtual-camera DLL is already up to date.' -ForegroundColor DarkGray
 }
 
 # --- 3. Register the camera for all users, in the background ---
