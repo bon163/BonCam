@@ -1,6 +1,9 @@
 .tools/
 target/
 bin/
+# ...but windows-host/src/bin holds Rust binary SOURCES, not build output.
+!windows-host/src/bin/
+!windows-host/src/bin/**
 obj/
 *.obj
 .DS_Store
