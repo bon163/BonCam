@@ -3,6 +3,10 @@ name = "windows-host"
 edition.workspace = true
 license.workspace = true
 version.workspace = true
+# The crate now has two binaries (windows-host + the synthetic_sender test tool),
+# so a bare `cargo run -p windows-host` would be ambiguous. Pin the real host as
+# the default so start.cmd and any plain `cargo run` keep working.
+default-run = "windows-host"
 
 [dependencies]
 anyhow.workspace = true
