@@ -1,7 +1,130 @@
 # iPhone Camera Streaming Handoff
 
-Last updated: 2026-07-05 (branch `stream-60fps-option`: in-app 60fps toggle,
-default 30; DLL advertises a 30-60 fps capability range)
+## Setting up on a fresh machine (e.g. after a laptop reformat)
+
+The repo (`github.com/bon163/BonCam`) has all source across every branch
+(`main`, `IOS-Redesign`, `single-start-script`, `tooling-synthetic-sender`,
+`host-native-webrtc-receive` — the last is fully merged into `main`, see
+below). Only one small file is gitignored and local-only:
+
+- `paired-devices.json` — generated at runtime; if lost, the app just
+  re-pairs with the host on next connect. Not critical to back up.
+
+Everything else gitignored (`target/`, `.tools/`, `*.obj`, the DLL `bin/`
+folders) is build output that regenerates on the next build — do not bother
+backing those up.
+
+Steps:
+1. Install Git and the Rust toolchain via [rustup](https://rustup.rs/)
+   (`windows-host` and `windows-virtual-camera` are Rust/C++ — rustup also
+   pulls in the MSVC linker prompt if Visual Studio Build Tools aren't
+   already present; accept it).
+2. `git clone https://github.com/bon163/BonCam.git` (or wherever you keep
+   it, e.g. `Documents\Iphone Camera Streaming`). `main` has everything
+   current; switch branches only if resuming in-progress work on one of the
+   others above.
+3. Copy `paired-devices.json` back from backup if you want to skip re-pairing.
+4. Run `.\start.cmd -Rebuild` from an elevated prompt — this builds the DLL,
+   installs/registers the virtual camera machine-wide, and starts the host.
+   (`.\start.cmd` alone skips the rebuild if the DLL is already installed,
+   which won't be true on a fresh machine — use `-Rebuild` the first time.)
+5. Re-check the LAN IP with `Get-NetIPAddress -AddressFamily IPv4` (it's
+   printed by start.cmd too) and point the iPhone app at
+   `http://<that-ip>:41003`. The iPhone app itself needs no reinstall — it's
+   already built and running on the phone from the last Xcode build; only
+   rebuild it in Xcode on a Mac if you're resuming iOS-side work.
+
+Last updated: 2026-07-06 (added a phone-free synthetic WebRTC sender for testing;
+branch `tooling-synthetic-sender`)
+
+## 2026-07-06: synthetic sender — phone-free end-to-end testing (branch `tooling-synthetic-sender`)
+
+New binary `windows-host/src/bin/synthetic_sender.rs`: a real WebRTC peer that
+speaks the exact `/signal/*` protocol the iOS app and /phone page speak, so the
+whole phone->host->latest.rgba pipeline can be exercised from the command line
+with NO phone and NO browser (the Edge fake-camera still needed a GUI + clicking).
+Nearly every entry below is "COMPILES but NOT verified live"; this closes that gap.
+
+What it does: builds an offering `RTCPeerConnection` (webrtc-rs, default codecs so
+H264 negotiates against the receiver's MediaEngine, no ICE servers = loopback/LAN
+host candidates), adds an H264 `TrackLocalStaticSample`, drives the signaling
+handshake (`POST /signal/reset` -> offer -> poll `GET /signal/answer` -> trickle
+candidates both ways), encodes an animated I420 test pattern with openh264, and
+feeds it to the track. It also reads RTCP off the sender and answers the host's
+PLI by forcing a keyframe — so the keyframe path that previously needed a phone
+dropping packets is now exercisable on demand.
+
+Run it (no admin, no phone):
+    cargo run -p windows-host                              # terminal 1: the host
+    cargo run --release -p windows-host --bin synthetic_sender   # terminal 2
+Options: --host 127.0.0.1 --port 41003 --width 1280 --height 720 --fps 30
+         --seconds 0(=forever) --bitrate 4000000.
+
+VERIFIED LIVE 2026-07-06 (host + sender both on this PC, no phone): host.log logged
+the full healthy sequence — `answered phone offer as host-native` -> `peer
+connection state connected` -> `remote track added (video/H264)` -> initial
+`decode error Native:16` on the first access unit (missing param sets at join) ->
+host `requested keyframe (PLI)` -> sender forced an IDR -> `raw bridge frames
+FLOWING` -> `latest.rgba` LastWriteTime advanced. The PLI round-trip works.
+
+Frame-rate note: bounded by SOFTWARE openh264 encode, not the tool's Rust code
+(release barely beat debug — the encoder is a C lib). On this machine 1280x720 ~=
+13fps; 640x360 hits a clean 30fps (measured 150 frames in 5s). Generating the
+pattern directly in I420 (not RGB) removed the pure-Rust RGB->YUV conversion that
+was the second bottleneck. Use 720p/13fps for connectivity/PLI/soak checks; use
+`--width 640 --height 360` when you need to stress the host's 30fps latest-wins
+decode_loop. Only `windows-host/src/bin/synthetic_sender.rs` was added — no change
+to the host, DLL, iOS app, or protocol.
+
+## 2026-07-06: TODO — live end-to-end verification (everything is merged + rebuilt)
+
+State as of this update: `main` (b3ba5dc) contains ALL recent work — the quality/
+stability pass (1080p default, pinned bitrate, `maintain-resolution`, DLL buffer
+reuse), the in-app 60fps toggle, the stale-frame signal-lost overlay, the RTCP PLI
+keyframe request, native in-process WebRTC receive, and start.ps1 DLL auto-reinstall.
+Working tree is clean; no unmerged branches remain (the `host-stale-frame-fallback`
+and `host-webrtc-keyframe-request` branches landed as commits 3bcc3b4 and def22ea).
+The iOS app was REBUILT on the Mac on 2026-07-05, so the phone binary now carries the
+1080p default, encoding-parameter/bitrate work, 60fps toggle, landscape orientation,
+and wake-lock/reconnect. So nothing is code-blocked anymore — the only thing left is
+to confirm the whole stack works live with the rebuilt app. (Deferred: user was
+travelling and couldn't test.)
+
+DEPLOY GOTCHA to fix before testing: the machine-wide DLL is STALE. Deployed
+`C:\ProgramData\IPhoneCameraStreaming\iphone_camera_source.dll` was 226,304 bytes /
+17:58, while the current `source\bin` build is 232,960 bytes / 23:00 — real apps load
+the ProgramData copy, so they'd run old code (no stale overlay etc.) until redeployed.
+Run `.\start.cmd -Rebuild` (self-elevates, reinstalls the DLL, registers all-users/
+system, runs the host). If a real app still shows old behaviour, svchost is holding
+the old module — admin `Restart-Service FrameServer`.
+
+LAN IP on 2026-07-05 was 192.168.1.227 (Wi-Fi) — RE-CHECK before testing
+(`Get-NetIPAddress -AddressFamily IPv4`), it drifts when the PC changes Wi-Fi (this
+is the recurring "frozen frame" cause). Phone must be on the SAME Wi-Fi; point the app
+at http://<ip>:41003.
+
+Verify in this one run (each item is COMPILED but NOT yet confirmed live with the
+rebuilt app):
+- Healthy host.log sequence: `answered phone offer as host-native` -> `peer
+  connection state connected` -> `remote track added (video/H264)` -> `decode stats:`
+  with backlog 0-1.
+- Quality: picture stays full-res through a Wi-Fi blip instead of going soft
+  (bitrate pin + maintain-resolution) and 1080p is the default stream.
+- 60fps: enable Settings > Streaming > 60 fps, confirm the target app actually paces
+  at 60 (caveat: nominal MF_MT_FRAME_RATE stays 30, so an app that ignores the
+  fps range stays at 30 — see the 60fps note below for the fix if so).
+- Stale overlay: let the stream drop, camera should show the red signal-lost overlay
+  within ~3s (`stream STALE age=...ms`) then clear on reconnect (`stream RECOVERED`).
+- Keyframe PLI: force a network blip, expect `requested keyframe (PLI)` in host.log
+  and the decode errors STOPPING instead of freezing forever.
+
+After this passes, the next real projects (no phone dependency) are: persistent
+hands-off all-users/System camera registration that survives without a babysat
+registrar window (new Teams needs it; also clean up the HKCU reg shadowing HKLM), and
+auto-discovery of the host IP (mDNS/Bonjour or in-app host picker) to kill the stale-
+saved-IP freeze for good.
+
+## 2026-07-05: in-app 60fps option (branch `stream-60fps-option`)
 
 ## 2026-07-05: in-app 60fps option (branch `stream-60fps-option`)
 
