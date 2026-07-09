@@ -1,5 +1,39 @@
 # iPhone Camera Streaming Handoff
 
+## Setting up on a fresh machine (e.g. after a laptop reformat)
+
+The repo (`github.com/bon163/BonCam`) has all source across every branch
+(`main`, `IOS-Redesign`, `single-start-script`, `tooling-synthetic-sender`,
+`host-native-webrtc-receive` — the last is fully merged into `main`, see
+below). Only one small file is gitignored and local-only:
+
+- `paired-devices.json` — generated at runtime; if lost, the app just
+  re-pairs with the host on next connect. Not critical to back up.
+
+Everything else gitignored (`target/`, `.tools/`, `*.obj`, the DLL `bin/`
+folders) is build output that regenerates on the next build — do not bother
+backing those up.
+
+Steps:
+1. Install Git and the Rust toolchain via [rustup](https://rustup.rs/)
+   (`windows-host` and `windows-virtual-camera` are Rust/C++ — rustup also
+   pulls in the MSVC linker prompt if Visual Studio Build Tools aren't
+   already present; accept it).
+2. `git clone https://github.com/bon163/BonCam.git` (or wherever you keep
+   it, e.g. `Documents\Iphone Camera Streaming`). `main` has everything
+   current; switch branches only if resuming in-progress work on one of the
+   others above.
+3. Copy `paired-devices.json` back from backup if you want to skip re-pairing.
+4. Run `.\start.cmd -Rebuild` from an elevated prompt — this builds the DLL,
+   installs/registers the virtual camera machine-wide, and starts the host.
+   (`.\start.cmd` alone skips the rebuild if the DLL is already installed,
+   which won't be true on a fresh machine — use `-Rebuild` the first time.)
+5. Re-check the LAN IP with `Get-NetIPAddress -AddressFamily IPv4` (it's
+   printed by start.cmd too) and point the iPhone app at
+   `http://<that-ip>:41003`. The iPhone app itself needs no reinstall — it's
+   already built and running on the phone from the last Xcode build; only
+   rebuild it in Xcode on a Mac if you're resuming iOS-side work.
+
 Last updated: 2026-07-06 (added a phone-free synthetic WebRTC sender for testing;
 branch `tooling-synthetic-sender`)
 
